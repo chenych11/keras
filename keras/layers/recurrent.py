@@ -31,17 +31,19 @@ class Recurrent(MaskedLayer):
             # left-pad in time with 0
             padding = alloc_zeros_matrix(pad, mask.shape[1], 1)
             mask = T.concatenate([padding, mask], axis=0)
-        return mask.astype('int8')
+        # It is actually a little faster to cast mask to floatX.
+        # return mask.astype('int8')
+        return mask.astype(theano.config.floatX)
 
 
 class SimpleRNN(Recurrent):
-    '''
+    """
         Fully connected RNN where output is to fed back to input.
 
         Not a particularly useful model,
         included for demonstration purposes
         (demonstrates how to use theano.scan to build a basic RNN).
-    '''
+    """
     def __init__(self, input_dim, output_dim,
                  init='glorot_uniform', inner_init='orthogonal', activation='sigmoid', weights=None,
                  truncate_gradient=-1, return_sequences=False):
@@ -58,18 +60,18 @@ class SimpleRNN(Recurrent):
 
         self.W = self.init((self.input_dim, self.output_dim))
         self.U = self.inner_init((self.output_dim, self.output_dim))
-        self.b = shared_zeros((self.output_dim))
+        self.b = shared_zeros(self.output_dim)
         self.params = [self.W, self.U, self.b]
 
         if weights is not None:
             self.set_weights(weights)
 
     def _step(self, x_t, mask_tm1, h_tm1, u):
-        '''
+        """
             Variable names follow the conventions from:
             http://deeplearning.net/software/theano/library/scan.html
 
-        '''
+        """
         return self.activation(x_t + mask_tm1 * T.dot(h_tm1, u))
 
     def get_output(self, train=False):
@@ -106,7 +108,7 @@ class SimpleRNN(Recurrent):
 
 
 class SimpleDeepRNN(Recurrent):
-    '''
+    """
         Fully connected RNN where the output of multiple timesteps
         (up to "depth" steps in the past) is fed back to the input:
 
@@ -114,7 +116,7 @@ class SimpleDeepRNN(Recurrent):
 
         This demonstrates how to build RNNs with arbitrary lookback.
         Also (probably) not a super useful model.
-    '''
+    """
     def __init__(self, input_dim, output_dim, depth=3,
                  init='glorot_uniform', inner_init='orthogonal',
                  activation='sigmoid', inner_activation='hard_sigmoid',
@@ -134,7 +136,7 @@ class SimpleDeepRNN(Recurrent):
 
         self.W = self.init((self.input_dim, self.output_dim))
         self.Us = [self.inner_init((self.output_dim, self.output_dim)) for _ in range(self.depth)]
-        self.b = shared_zeros((self.output_dim))
+        self.b = shared_zeros(self.output_dim)
         self.params = [self.W] + self.Us + [self.b]
 
         if weights is not None:
@@ -193,7 +195,7 @@ class SimpleDeepRNN(Recurrent):
 
 
 class GRU(Recurrent):
-    '''
+    """
         Gated Recurrent Unit - Cho et al. 2014
 
         Acts as a spatiotemporal projection,
@@ -213,7 +215,7 @@ class GRU(Recurrent):
                 http://www.aclweb.org/anthology/W14-4012
             Empirical Evaluation of Gated Recurrent Neural Networks on Sequence Modeling
                 http://arxiv.org/pdf/1412.3555v1.pdf
-    '''
+    """
     def __init__(self, input_dim, output_dim=128,
                  init='glorot_uniform', inner_init='orthogonal',
                  activation='sigmoid', inner_activation='hard_sigmoid',
@@ -233,15 +235,15 @@ class GRU(Recurrent):
 
         self.W_z = self.init((self.input_dim, self.output_dim))
         self.U_z = self.inner_init((self.output_dim, self.output_dim))
-        self.b_z = shared_zeros((self.output_dim))
+        self.b_z = shared_zeros(self.output_dim)
 
         self.W_r = self.init((self.input_dim, self.output_dim))
         self.U_r = self.inner_init((self.output_dim, self.output_dim))
-        self.b_r = shared_zeros((self.output_dim))
+        self.b_r = shared_zeros(self.output_dim)
 
         self.W_h = self.init((self.input_dim, self.output_dim))
         self.U_h = self.inner_init((self.output_dim, self.output_dim))
-        self.b_h = shared_zeros((self.output_dim))
+        self.b_h = shared_zeros(self.output_dim)
 
         self.params = [
             self.W_z, self.U_z, self.b_z,
@@ -294,8 +296,8 @@ class GRU(Recurrent):
                 "return_sequences": self.return_sequences}
 
 
-class LSTM(Recurrent):
-    '''
+class LSTMLayer(Recurrent):
+    """
         Acts as a spatiotemporal projection,
         turning a sequence of vectors into a single vector.
 
@@ -318,7 +320,159 @@ class LSTM(Recurrent):
                 http://www.mitpressjournals.org/doi/pdf/10.1162/089976600300015015
             Supervised sequence labelling with recurrent neural networks
                 http://www.cs.toronto.edu/~graves/preprint.pdf
-    '''
+    """
+    def __init__(self, input_dim, output_dim=128, train_init_cell=True, train_init_h=True,
+                 init='glorot_uniform', inner_init='orthogonal', forget_bias_init='one',
+                 input_activation='tanh', gate_activation='hard_sigmoid', output_activation='tanh',
+                 weights=None, truncate_gradient=-1, return_sequences=False):
+
+        super(LangLSTMLayerV1, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.truncate_gradient = truncate_gradient
+        self.return_sequences = return_sequences
+
+        self.init = initializations.get(init)
+        self.inner_init = initializations.get(inner_init)
+        self.forget_bias_init = initializations.get(forget_bias_init)
+        self.input_activation = activations.get(input_activation)
+        self.gate_activation = activations.get(gate_activation)
+        self.output_activation = activations.get(output_activation)
+        self.input = T.tensor3()
+
+        W_z = self.init((self.input_dim, self.output_dim)).get_value(borrow=True)
+        R_z = self.inner_init((self.output_dim, self.output_dim)).get_value(borrow=True)
+        # self.b_z = shared_zeros(self.output_dim)
+
+        W_i = self.init((self.input_dim, self.output_dim)).get_value(borrow=True)
+        R_i = self.inner_init((self.output_dim, self.output_dim)).get_value(borrow=True)
+        # self.b_i = shared_zeros(self.output_dim)
+
+        W_f = self.init((self.input_dim, self.output_dim)).get_value(borrow=True)
+        R_f = self.inner_init((self.output_dim, self.output_dim)).get_value(borrow=True)
+        # self.b_f = self.forget_bias_init(self.output_dim)
+
+        W_o = self.init((self.input_dim, self.output_dim)).get_value(borrow=True)
+        R_o = self.inner_init((self.output_dim, self.output_dim)).get_value(borrow=True)
+        # self.b_o = shared_zeros(self.output_dim)
+
+        self.h_m1 = shared_zeros(shape=(1, self.output_dim), name='h0')
+        self.c_m1 = shared_zeros(shape=(1, self.output_dim), name='c0')
+
+        W = np.vstack((W_z[np.newaxis, :, :],
+                       W_i[np.newaxis, :, :],
+                       W_f[np.newaxis, :, :],
+                       W_o[np.newaxis, :, :]))  # shape = (4, input_dim, output_dim)
+        R = np.vstack((R_z[np.newaxis, :, :],
+                       R_i[np.newaxis, :, :],
+                       R_f[np.newaxis, :, :],
+                       R_o[np.newaxis, :, :]))  # shape = (4, output_dim, output_dim)
+        self.W = theano.shared(W, name='Input to hidden weights (zifo)', borrow=True)
+        self.R = theano.shared(R, name='Recurrent weights (zifo)', borrow=True)
+        self.b = theano.shared(np.zeros(shape=(4, self.output_dim), dtype=theano.config.floatX),
+                               name='bias', borrow=True)
+
+        self.params = [self.W, self.R]
+        if train_init_cell:
+            self.params.append(self.c_m1)
+        if train_init_h:
+            self.params.append(self.h_m1)
+
+        if weights is not None:
+            self.set_weights(weights)
+
+    def _step(self,
+              Y_t, mask,      # sequence
+              h_tm1, c_tm1,   # output_info
+              R):          # non_sequence
+        # h_mask_tm1 = mask_tm1 * h_tm1
+        # c_mask_tm1 = mask_tm1 * c_tm1
+        G_tm1 = T.dot(h_tm1, R)
+        M_t = Y_t + G_tm1
+        z_t = self.input_activation(M_t[:, 0, :])
+        ifo_t = self.gate_activation(M_t[:, 1:, :])
+        i_t = ifo_t[:, 0, :]
+        f_t = ifo_t[:, 1, :]
+        o_t = ifo_t[:, 2, :]
+        c_t_cndt = f_t * c_tm1 + i_t * z_t
+        h_t_cndt = o_t * self.output_activation(c_t_cndt)
+        h_t = mask * h_t_cndt + (1-mask) * h_tm1
+        c_t = mask * c_t_cndt + (1-mask) * c_tm1
+        return h_t, c_t
+
+    def get_output(self, train=False):
+        X = self.get_input(train)
+        mask = self.get_padded_shuffled_mask(train, X, pad=0)
+        X = X.dimshuffle((1, 0, 2))
+        Y = T.dot(X, self.W) + self.b
+        # h0 = T.unbroadcast(alloc_zeros_matrix(X.shape[1], self.output_dim), 1)
+        h0 = T.repeat(self.h_m1, X.shape[1], axis=0)
+        c0 = T.repeat(self.c_m1, X.shape[1], axis=0)
+
+        [outputs, _], updates = theano.scan(
+            self._step,
+            sequences=[Y, mask],
+            outputs_info=[h0, c0],
+            non_sequences=[self.R],
+            truncate_gradient=self.truncate_gradient, strict=True,
+            allow_gc=theano.config.scan.allow_gc)
+
+        if self.return_sequences:
+            return (T.concatenate(h0.dimshuffle('x', 0, 1), outputs, axis=0).dimshuffle((1, 0, 2)),
+                    mask[1:].dimshuffle(1, 0, 2))
+        return outputs[-1]
+
+    def set_init_cell_parameter(self, is_param=True):
+        if is_param:
+            if self.c_m1 not in self.params:
+                self.params.append(self.c_m1)
+        else:
+            self.params.remove(self.c_m1)
+
+    def set_init_h_parameter(self, is_param=True):
+        if is_param:
+            if self.h_m1 not in self.params:
+                self.params.append(self.h_m1)
+        else:
+            self.params.remove(self.h_m1)
+
+    def get_config(self):
+        return {"name": self.__class__.__name__,
+                "input_dim": self.input_dim,
+                "output_dim": self.output_dim,
+                "init": self.init.__name__,
+                "inner_init": self.inner_init.__name__,
+                "forget_bias_init": self.forget_bias_init.__name__,
+                "input_activation": self.input_activation.__name__,
+                "gate_activation": self.gate_activation.__name__,
+                "truncate_gradient": self.truncate_gradient,
+                "return_sequences": self.return_sequences}
+
+class LSTM(Recurrent):
+    """
+        Acts as a spatiotemporal projection,
+        turning a sequence of vectors into a single vector.
+
+        Eats inputs with shape:
+        (nb_samples, max_sample_length (samples shorter than this are padded with zeros at the end), input_dim)
+
+        and returns outputs with shape:
+        if not return_sequences:
+            (nb_samples, output_dim)
+        if return_sequences:
+            (nb_samples, max_sample_length, output_dim)
+
+        For a step-by-step description of the algorithm, see:
+        http://deeplearning.net/tutorial/lstm.html
+
+        References:
+            Long short-term memory (original 97 paper)
+                http://deeplearning.cs.cmu.edu/pdfs/Hochreiter97_lstm.pdf
+            Learning to forget: Continual prediction with LSTM
+                http://www.mitpressjournals.org/doi/pdf/10.1162/089976600300015015
+            Supervised sequence labelling with recurrent neural networks
+                http://www.cs.toronto.edu/~graves/preprint.pdf
+    """
     def __init__(self, input_dim, output_dim=128,
                  init='glorot_uniform', inner_init='orthogonal', forget_bias_init='one',
                  activation='tanh', inner_activation='hard_sigmoid',
@@ -339,19 +493,19 @@ class LSTM(Recurrent):
 
         self.W_i = self.init((self.input_dim, self.output_dim))
         self.U_i = self.inner_init((self.output_dim, self.output_dim))
-        self.b_i = shared_zeros((self.output_dim))
+        self.b_i = shared_zeros(self.output_dim)
 
         self.W_f = self.init((self.input_dim, self.output_dim))
         self.U_f = self.inner_init((self.output_dim, self.output_dim))
-        self.b_f = self.forget_bias_init((self.output_dim))
+        self.b_f = self.forget_bias_init(self.output_dim)
 
         self.W_c = self.init((self.input_dim, self.output_dim))
         self.U_c = self.inner_init((self.output_dim, self.output_dim))
-        self.b_c = shared_zeros((self.output_dim))
+        self.b_c = shared_zeros(self.output_dim)
 
         self.W_o = self.init((self.input_dim, self.output_dim))
         self.U_o = self.inner_init((self.output_dim, self.output_dim))
-        self.b_o = shared_zeros((self.output_dim))
+        self.b_o = shared_zeros(self.output_dim)
 
         self.params = [
             self.W_i, self.U_i, self.b_i,
@@ -387,7 +541,7 @@ class LSTM(Recurrent):
         xc = T.dot(X, self.W_c) + self.b_c
         xo = T.dot(X, self.W_o) + self.b_o
 
-        [outputs, memories], updates = theano.scan(
+        [outputs, _], updates = theano.scan(
             self._step,
             sequences=[xi, xf, xo, xc, padded_mask],
             outputs_info=[
@@ -415,7 +569,7 @@ class LSTM(Recurrent):
 
 
 class JZS1(Recurrent):
-    '''
+    """
         Evolved recurrent neural network architectures from the evaluation of thousands
         of models, serving as alternatives to LSTMs and GRUs. See Jozefowicz et al. 2015.
 
@@ -433,7 +587,7 @@ class JZS1(Recurrent):
         References:
             An Empirical Exploration of Recurrent Network Architectures
                 http://www.jmlr.org/proceedings/papers/v37/jozefowicz15.pdf
-    '''
+    """
     def __init__(self, input_dim, output_dim=128,
                  init='glorot_uniform', inner_init='orthogonal',
                  activation='tanh', inner_activation='sigmoid',
@@ -452,14 +606,14 @@ class JZS1(Recurrent):
         self.input = T.tensor3()
 
         self.W_z = self.init((self.input_dim, self.output_dim))
-        self.b_z = shared_zeros((self.output_dim))
+        self.b_z = shared_zeros(self.output_dim)
 
         self.W_r = self.init((self.input_dim, self.output_dim))
         self.U_r = self.inner_init((self.output_dim, self.output_dim))
-        self.b_r = shared_zeros((self.output_dim))
+        self.b_r = shared_zeros(self.output_dim)
 
         self.U_h = self.inner_init((self.output_dim, self.output_dim))
-        self.b_h = shared_zeros((self.output_dim))
+        self.b_h = shared_zeros(self.output_dim)
 
         # P_h used to project X onto different dimension, using sparse random projections
         if self.input_dim == self.output_dim:
@@ -520,7 +674,7 @@ class JZS1(Recurrent):
 
 
 class JZS2(Recurrent):
-    '''
+    """
         Evolved recurrent neural network architectures from the evaluation of thousands
         of models, serving as alternatives to LSTMs and GRUs. See Jozefowicz et al. 2015.
 
@@ -538,7 +692,7 @@ class JZS2(Recurrent):
         References:
             An Empirical Exploration of Recurrent Network Architectures
                 http://www.jmlr.org/proceedings/papers/v37/jozefowicz15.pdf
-    '''
+    """
     def __init__(self, input_dim, output_dim=128,
                  init='glorot_uniform', inner_init='orthogonal',
                  activation='tanh', inner_activation='sigmoid',
@@ -558,14 +712,14 @@ class JZS2(Recurrent):
 
         self.W_z = self.init((self.input_dim, self.output_dim))
         self.U_z = self.inner_init((self.output_dim, self.output_dim))
-        self.b_z = shared_zeros((self.output_dim))
+        self.b_z = shared_zeros(self.output_dim)
 
         self.U_r = self.inner_init((self.output_dim, self.output_dim))
-        self.b_r = shared_zeros((self.output_dim))
+        self.b_r = shared_zeros(self.output_dim)
 
         self.W_h = self.init((self.input_dim, self.output_dim))
         self.U_h = self.inner_init((self.output_dim, self.output_dim))
-        self.b_h = shared_zeros((self.output_dim))
+        self.b_h = shared_zeros(self.output_dim)
 
         # P_h used to project X onto different dimension, using sparse random projections
         if self.input_dim == self.output_dim:
@@ -626,7 +780,7 @@ class JZS2(Recurrent):
 
 
 class JZS3(Recurrent):
-    '''
+    """
         Evolved recurrent neural network architectures from the evaluation of thousands
         of models, serving as alternatives to LSTMs and GRUs. See Jozefowicz et al. 2015.
 
@@ -644,7 +798,7 @@ class JZS3(Recurrent):
         References:
             An Empirical Exploration of Recurrent Network Architectures
                 http://www.jmlr.org/proceedings/papers/v37/jozefowicz15.pdf
-    '''
+    """
     def __init__(self, input_dim, output_dim=128,
                  init='glorot_uniform', inner_init='orthogonal',
                  activation='tanh', inner_activation='sigmoid',
@@ -664,15 +818,15 @@ class JZS3(Recurrent):
 
         self.W_z = self.init((self.input_dim, self.output_dim))
         self.U_z = self.inner_init((self.output_dim, self.output_dim))
-        self.b_z = shared_zeros((self.output_dim))
+        self.b_z = shared_zeros(self.output_dim)
 
         self.W_r = self.init((self.input_dim, self.output_dim))
         self.U_r = self.inner_init((self.output_dim, self.output_dim))
-        self.b_r = shared_zeros((self.output_dim))
+        self.b_r = shared_zeros(self.output_dim)
 
         self.W_h = self.init((self.input_dim, self.output_dim))
         self.U_h = self.inner_init((self.output_dim, self.output_dim))
-        self.b_h = shared_zeros((self.output_dim))
+        self.b_h = shared_zeros(self.output_dim)
 
         self.params = [
             self.W_z, self.U_z, self.b_z,

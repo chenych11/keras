@@ -3,12 +3,12 @@ from setuptools import find_packages
 
 
 setup(name='Keras',
-      version='0.1.2',
+      version='0.1.3',
       description='Theano-based Deep Learning library',
-      author='Francois Chollet',
+      author='Francois Chollet, Yunchuan Chen',
       author_email='francois.chollet@gmail.com',
       url='https://github.com/fchollet/keras',
-      download_url='https://github.com/fchollet/keras/tarball/0.1.2',
+      download_url='https://github.com/chenych11/keras',
       license='MIT',
       install_requires=['theano', 'pyyaml', 'h5py'],
       packages=find_packages())

@@ -19,6 +19,7 @@ class Sequential(Layer):
     '''
 
     def __init__(self, layers=[]):
+        super(Sequential, self).__init__()
         self.layers = []
         self.params = []
         self.regularizers = []

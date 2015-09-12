@@ -566,6 +566,11 @@ class Sequential(Model, containers.Sequential):
             self.layers[k].set_weights(weights)
         f.close()
 
+    def update_model(self):
+        layers = self.layers
+        self.layers = []
+        self.__init__(layers=layers)
+
 
 class Graph(Model, containers.Graph):
     def compile(self, optimizer, loss, theano_mode=None):
