@@ -298,6 +298,7 @@ class GRU(Recurrent):
 
 class LSTMLayer(Recurrent):
     """
+        optimized version: Not using mask in _step function and tensorized computation.
         Acts as a spatiotemporal projection,
         turning a sequence of vectors into a single vector.
 
@@ -326,7 +327,7 @@ class LSTMLayer(Recurrent):
                  input_activation='tanh', gate_activation='hard_sigmoid', output_activation='tanh',
                  weights=None, truncate_gradient=-1, return_sequences=False):
 
-        super(LangLSTMLayerV1, self).__init__()
+        super(LSTMLayer, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.truncate_gradient = truncate_gradient
@@ -339,6 +340,7 @@ class LSTMLayer(Recurrent):
         self.gate_activation = activations.get(gate_activation)
         self.output_activation = activations.get(output_activation)
         self.input = T.tensor3()
+        self.time_range = None
 
         W_z = self.init((self.input_dim, self.output_dim)).get_value(borrow=True)
         R_z = self.inner_init((self.output_dim, self.output_dim)).get_value(borrow=True)
@@ -382,7 +384,7 @@ class LSTMLayer(Recurrent):
             self.set_weights(weights)
 
     def _step(self,
-              Y_t, mask,      # sequence
+              Y_t,      # sequence
               h_tm1, c_tm1,   # output_info
               R):          # non_sequence
         # h_mask_tm1 = mask_tm1 * h_tm1
@@ -394,15 +396,20 @@ class LSTMLayer(Recurrent):
         i_t = ifo_t[:, 0, :]
         f_t = ifo_t[:, 1, :]
         o_t = ifo_t[:, 2, :]
-        c_t_cndt = f_t * c_tm1 + i_t * z_t
-        h_t_cndt = o_t * self.output_activation(c_t_cndt)
-        h_t = mask * h_t_cndt + (1-mask) * h_tm1
-        c_t = mask * c_t_cndt + (1-mask) * c_tm1
+        # c_t_cndt = f_t * c_tm1 + i_t * z_t
+        # h_t_cndt = o_t * self.output_activation(c_t_cndt)
+        c_t = f_t * c_tm1 + i_t * z_t
+        h_t = o_t * self.output_activation(c_t)
+        # h_t = mask * h_t_cndt + (1-mask) * h_tm1
+        # c_t = mask * c_t_cndt + (1-mask) * c_tm1
         return h_t, c_t
 
     def get_output(self, train=False):
         X = self.get_input(train)
-        mask = self.get_padded_shuffled_mask(train, X, pad=0)
+        # mask = self.get_padded_shuffled_mask(train, X, pad=0)
+        mask = self.get_input_mask(train=train)
+        ind = T.switch(T.eq(mask[:, -1], 1.), mask.shape[-1], T.argmin(mask, axis=-1)).astype('int32')
+        max_time = T.max(ind)
         X = X.dimshuffle((1, 0, 2))
         Y = T.dot(X, self.W) + self.b
         # h0 = T.unbroadcast(alloc_zeros_matrix(X.shape[1], self.output_dim), 1)
@@ -411,16 +418,17 @@ class LSTMLayer(Recurrent):
 
         [outputs, _], updates = theano.scan(
             self._step,
-            sequences=[Y, mask],
+            sequences=Y,
             outputs_info=[h0, c0],
-            non_sequences=[self.R],
+            non_sequences=[self.R], n_steps=max_time,
             truncate_gradient=self.truncate_gradient, strict=True,
             allow_gc=theano.config.scan.allow_gc)
 
+        res = T.concatenate([h0.dimshuffle('x', 0, 1), outputs], axis=0).dimshuffle((1, 0, 2))
         if self.return_sequences:
-            return (T.concatenate(h0.dimshuffle('x', 0, 1), outputs, axis=0).dimshuffle((1, 0, 2)),
-                    mask[1:].dimshuffle(1, 0, 2))
-        return outputs[-1]
+            return res
+        #return outputs[-1]
+        return res[T.arange(mask.shape[0], dtype='int32'), ind]
 
     def set_init_cell_parameter(self, is_param=True):
         if is_param:
@@ -436,17 +444,12 @@ class LSTMLayer(Recurrent):
         else:
             self.params.remove(self.h_m1)
 
-    def get_config(self):
-        return {"name": self.__class__.__name__,
-                "input_dim": self.input_dim,
-                "output_dim": self.output_dim,
-                "init": self.init.__name__,
-                "inner_init": self.inner_init.__name__,
-                "forget_bias_init": self.forget_bias_init.__name__,
-                "input_activation": self.input_activation.__name__,
-                "gate_activation": self.gate_activation.__name__,
-                "truncate_gradient": self.truncate_gradient,
-                "return_sequences": self.return_sequences}
+    def get_time_range(self, train):
+        mask = self.get_input_mask(train=train)
+        ind = T.switch(T.eq(mask[:, -1], 1.), mask.shape[-1], T.argmin(mask, axis=-1)).astype('int32')
+        self.time_range = ind
+        return ind
+
 
 class LSTM(Recurrent):
     """
