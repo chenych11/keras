@@ -112,10 +112,10 @@ class Layer(object):
 
 
 class MaskedLayer(Layer):
-    '''
+    """
     If your layer trivially supports masking (by simply copying the input mask to the output), then subclass MaskedLayer
     instead of Layer, and make sure that you incorporate the input mask into your calculation of get_output()
-    '''
+    """
     def supports_masked_input(self):
         return True
 
@@ -162,9 +162,9 @@ class Masking(MaskedLayer):
 
 class Merge(Layer):
     def __init__(self, layers, mode='sum'):
-        ''' Merge the output of a list of layers or containers into a single tensor.
+        """ Merge the output of a list of layers or containers into a single tensor.
             mode: {'sum', 'concat'}
-        '''
+        """
         if len(layers) < 2:
             raise Exception("Please specify two or more input layers (or containers) to merge")
         self.mode = mode
@@ -238,9 +238,9 @@ class Merge(Layer):
 
 
 class Dropout(MaskedLayer):
-    '''
+    """
         Hinton's dropout.
-    '''
+    """
     def __init__(self, p):
         super(Dropout, self).__init__()
         self.p = p
@@ -262,9 +262,9 @@ class Dropout(MaskedLayer):
 
 
 class Activation(MaskedLayer):
-    '''
+    """
         Apply an activation function to an output.
-    '''
+    """
     def __init__(self, activation, target=0, beta=0.1):
         super(Activation, self).__init__()
         self.activation = activations.get(activation)
@@ -283,11 +283,11 @@ class Activation(MaskedLayer):
 
 
 class Reshape(Layer):
-    '''
+    """
         Reshape an output to a certain shape.
         Can't be used as first layer in a model (no fixed input!)
         First dimension is assumed to be nb_samples.
-    '''
+    """
     def __init__(self, *dims):
         super(Reshape, self).__init__()
         self.dims = dims
@@ -303,9 +303,9 @@ class Reshape(Layer):
 
 
 class Permute(Layer):
-    '''
+    """
         Permute the dimensions of the data according to the given tuple
-    '''
+    """
     def __init__(self, dims):
         super(Permute, self).__init__()
         self.dims = dims
@@ -320,10 +320,10 @@ class Permute(Layer):
 
 
 class Flatten(Layer):
-    '''
+    """
         Reshape input to flat shape.
         First dimension is assumed to be nb_samples.
-    '''
+    """
     def __init__(self):
         super(Flatten, self).__init__()
 
@@ -335,12 +335,12 @@ class Flatten(Layer):
 
 
 class RepeatVector(Layer):
-    '''
+    """
         Repeat input n times.
 
         Dimensions of input are assumed to be (nb_samples, dim).
         Return tensor of shape (nb_samples, n, dim).
-    '''
+    """
     def __init__(self, n):
         super(RepeatVector, self).__init__()
         self.n = n
@@ -357,9 +357,9 @@ class RepeatVector(Layer):
 
 
 class Dense(Layer):
-    '''
+    """
         Just your regular fully connected NN layer.
-    '''
+    """
     def __init__(self, input_dim, output_dim, init='glorot_uniform', activation='linear', weights=None, name=None,
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
                  W_constraint=None, b_constraint=None):

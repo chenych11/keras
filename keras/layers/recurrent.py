@@ -296,6 +296,139 @@ class GRU(Recurrent):
                 "return_sequences": self.return_sequences}
 
 
+class LSTMLayerV0(Recurrent):
+    """
+        We should not use this version of the LSTM layer. Use LSTMLayer instead.
+        This version is easier to understand than LSTMLayer, however, it is less optimized.
+        Acts as a spatiotemporal projection,
+        turning a sequence of vectors into a single vector.
+
+        Eats inputs with shape:
+        (nb_samples, max_sample_length (samples shorter than this are padded with zeros at the end), input_dim)
+
+        and returns outputs with shape:
+        if not return_sequences:
+            (nb_samples, output_dim)
+        if return_sequences:
+            (nb_samples, max_sample_length, output_dim)
+
+        For a step-by-step description of the algorithm, see:
+        http://deeplearning.net/tutorial/lstm.html
+
+        References:
+            Long short-term memory (original 97 paper)
+                http://deeplearning.cs.cmu.edu/pdfs/Hochreiter97_lstm.pdf
+            Learning to forget: Continual prediction with LSTM
+                http://www.mitpressjournals.org/doi/pdf/10.1162/089976600300015015
+            Supervised sequence labelling with recurrent neural networks
+                http://www.cs.toronto.edu/~graves/preprint.pdf
+    """
+    def __init__(self, input_dim, output_dim=128,
+                 init='glorot_uniform', inner_init='orthogonal', forget_bias_init='one',
+                 activation='tanh', inner_activation='hard_sigmoid',
+                 weights=None, truncate_gradient=-1, return_sequences=False):
+
+        super(LSTMLayerV0, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.truncate_gradient = truncate_gradient
+        self.return_sequences = return_sequences
+
+        self.init = initializations.get(init)
+        self.inner_init = initializations.get(inner_init)
+        self.forget_bias_init = initializations.get(forget_bias_init)
+        self.activation = activations.get(activation)
+        self.inner_activation = activations.get(inner_activation)
+        self.input = T.tensor3()
+
+        self.W_i = self.init((self.input_dim, self.output_dim))
+        self.U_i = self.inner_init((self.output_dim, self.output_dim))
+        self.b_i = shared_zeros(self.output_dim)
+
+        self.W_f = self.init((self.input_dim, self.output_dim))
+        self.U_f = self.inner_init((self.output_dim, self.output_dim))
+        self.b_f = self.forget_bias_init(self.output_dim)
+
+        self.W_c = self.init((self.input_dim, self.output_dim))
+        self.U_c = self.inner_init((self.output_dim, self.output_dim))
+        self.b_c = shared_zeros(self.output_dim)
+
+        self.W_o = self.init((self.input_dim, self.output_dim))
+        self.U_o = self.inner_init((self.output_dim, self.output_dim))
+        self.b_o = shared_zeros(self.output_dim)
+
+        self.h00 = shared_zeros(shape=(1, self.output_dim))
+
+        self.params = [
+            self.W_i, self.U_i, self.b_i,
+            self.W_c, self.U_c, self.b_c,
+            self.W_f, self.U_f, self.b_f,
+            self.W_o, self.U_o, self.b_o,
+            self.h00
+        ]
+
+        if weights is not None:
+            self.set_weights(weights)
+
+    def get_padded_shuffled_mask(self, train, X, pad=0):
+        mask = self.get_input_mask(train)
+        if mask is None:
+            mask = T.ones_like(X.sum(axis=-1))  # is there a better way to do this without a sum?
+
+        # mask is (nb_samples, time)
+        mask = T.shape_padright(mask)  # (nb_samples, time, 1)
+        mask = T.addbroadcast(mask, -1)  # (time, nb_samples, 1) matrix.
+        mask = mask.dimshuffle(1, 0, 2)  # (time, nb_samples, 1)
+
+        if pad > 0:
+            # left-pad in time with 0
+            padding = alloc_zeros_matrix(pad, mask.shape[1], 1)
+            mask = T.concatenate([padding, mask], axis=0)
+        # return mask.astype('int8')
+        return mask.astype(theano.config.floatX)
+
+    def _step(self,
+              xi_t, xf_t, xo_t, xc_t, mask,  # sequence
+              h_tm1, c_tm1,                  # output_info
+              u_i, u_f, u_o, u_c):           # non_sequence
+        # h_mask_tm1 = mask_tm1 * h_tm1
+        # c_mask_tm1 = mask_tm1 * c_tm1
+
+        i_t = self.inner_activation(xi_t + T.dot(h_tm1, u_i))
+        f_t = self.inner_activation(xf_t + T.dot(h_tm1, u_f))
+        c_t_cndt = f_t * c_tm1 + i_t * self.activation(xc_t + T.dot(h_tm1, u_c))
+        o_t = self.inner_activation(xo_t + T.dot(h_tm1, u_o))
+        h_t_cndt = o_t * self.activation(c_t_cndt)
+        h_t = mask * h_t_cndt + (1-mask) * h_tm1
+        c_t = mask * c_t_cndt + (1-mask) * c_tm1
+        return h_t, c_t
+
+    def get_output(self, train=False):
+        X = self.get_input(train)
+        padded_mask = self.get_padded_shuffled_mask(train, X, pad=0)
+        X = X.dimshuffle((1, 0, 2))
+
+        xi = T.dot(X, self.W_i) + self.b_i
+        xf = T.dot(X, self.W_f) + self.b_f
+        xc = T.dot(X, self.W_c) + self.b_c
+        xo = T.dot(X, self.W_o) + self.b_o
+
+        # h0 = T.unbroadcast(alloc_zeros_matrix(X.shape[1], self.output_dim), 1)
+        h0 = T.repeat(self.h00, X.shape[1], axis=0)
+
+        [outputs, _], updates = theano.scan(
+            self._step,
+            sequences=[xi, xf, xo, xc, padded_mask],
+            outputs_info=[h0, T.unbroadcast(alloc_zeros_matrix(X.shape[1], self.output_dim), 1)],
+            non_sequences=[self.U_i, self.U_f, self.U_o, self.U_c],
+            truncate_gradient=self.truncate_gradient)
+
+        if self.return_sequences:
+            return (T.concatenate(h0.dimshuffle('x', 0, 1), outputs, axis=0).dimshuffle((1, 0, 2)),
+                    padded_mask[1:].dimshuffle(1, 0, 2))
+        return outputs[-1]
+
+
 class LSTMLayer(Recurrent):
     """
         optimized version: Not using mask in _step function and tensorized computation.
