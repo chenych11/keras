@@ -219,7 +219,7 @@ class MeanPooling(MaskedLayer):
 np.random.seed(1337)  # for reproducibility
 max_features = 20000
 maxlen = 100  # cut texts after this number of words (among top max_features most common words)
-batch_size = 32
+batch_size = 128
 
 print("Loading data...")
 (X_train, y_train), (X_test, y_test) = imdb.load_data(nb_words=max_features, test_split=0.2)
