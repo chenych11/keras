@@ -161,13 +161,14 @@ class Masking(MaskedLayer):
 
 
 class Merge(Layer):
-    def __init__(self, layers, mode='sum'):
+    def __init__(self, layers, mode='sum', concat_axis=-1):
         """ Merge the output of a list of layers or containers into a single tensor.
-            mode: {'sum', 'concat'}
+            mode: {'sum', 'mul', 'concat'}
         """
         if len(layers) < 2:
             raise Exception("Please specify two or more input layers (or containers) to merge")
         self.mode = mode
+        self.concat_axis = concat_axis
         self.layers = layers
         self.params = []
         self.regularizers = []
@@ -194,7 +195,12 @@ class Merge(Layer):
             return s
         elif self.mode == 'concat':
             inputs = [self.layers[i].get_output(train) for i in range(len(self.layers))]
-            return T.concatenate(inputs, axis=-1)
+            return T.concatenate(inputs, axis=self.concat_axis)
+        elif self.mode == 'mul':
+            s = self.layers[0].get_output(train)
+            for i in range(1, len(self.layers)):
+                s *= self.layers[i].get_output(train)
+            return s
         else:
             raise Exception('Unknown merge mode')
 
@@ -234,7 +240,8 @@ class Merge(Layer):
     def get_config(self):
         return {"name": self.__class__.__name__,
                 "layers": [l.get_config() for l in self.layers],
-                "mode": self.mode}
+                "mode": self.mode,
+                "concat_axis": self.concat_axis}
 
 
 class Dropout(MaskedLayer):
@@ -425,10 +432,10 @@ class Dense(Layer):
 
 
 class ActivityRegularization(Layer):
-    '''
+    """
         Layer that passes through its input unchanged, but applies an update
         to the cost function based on the activity.
-    '''
+    """
     def __init__(self, l1=0., l2=0.):
         super(ActivityRegularization, self).__init__()
         self.l1 = l1
@@ -448,13 +455,13 @@ class ActivityRegularization(Layer):
 
 
 class TimeDistributedDense(MaskedLayer):
-    '''
+    """
        Apply a same DenseLayer for each dimension[1] (shared_dimension) input
        Especially useful after a recurrent network with 'return_sequence=True'
        Tensor input dimensions:   (nb_sample, shared_dimension, input_dim)
        Tensor output dimensions:  (nb_sample, shared_dimension, output_dim)
 
-    '''
+    """
     def __init__(self, input_dim, output_dim, init='glorot_uniform', activation='linear', weights=None,
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
                  W_constraint=None, b_constraint=None):
@@ -514,11 +521,11 @@ class TimeDistributedDense(MaskedLayer):
 
 
 class AutoEncoder(Layer):
-    '''
+    """
         A customizable autoencoder model.
         If output_reconstruction then dim(input) = dim(output)
         else dim(output) = dim(hidden)
-    '''
+    """
     def __init__(self, encoder, decoder, output_reconstruction=True, weights=None):
 
         super(AutoEncoder, self).__init__()
