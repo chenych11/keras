@@ -10,8 +10,5 @@ setup(name='Keras',
       url='https://github.com/fchollet/keras',
       download_url='https://github.com/chenych11/keras',
       license='MIT',
-      install_requires=['theano', 'pyyaml'],
-      extras_require = {
-          'h5py': ['h5py'],
-      },
+      install_requires=['theano', 'pyyaml', 'h5py'],
       packages=find_packages())

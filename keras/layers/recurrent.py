@@ -541,7 +541,7 @@ class LSTMLayer(Recurrent):
         X = self.get_input(train)
         # mask = self.get_padded_shuffled_mask(train, X, pad=0)
         mask = self.get_input_mask(train=train)
-        ind = T.switch(T.eq(mask[:, -1], 1.), mask.shape[-1], T.argmin(mask, axis=-1)).astype('int32')
+        ind = T.switch(T.eq(mask[:, -1], 1.), mask.shape[-1], T.argmin(mask, axis=-1)).astype('int32').ravel()
         max_time = T.max(ind)
         X = X.dimshuffle((1, 0, 2))
         Y = T.dot(X, self.W) + self.b

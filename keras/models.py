@@ -1,20 +1,24 @@
 from __future__ import absolute_import
 from __future__ import print_function
+import warnings
+import pprint
+import logging
+
 import theano
 import theano.tensor as T
 import numpy as np
-import warnings, time, copy, pprint
-from six.moves import range
 import six
 
+from six.moves import range
 from . import optimizers
 from . import objectives
-from . import regularizers
-from . import constraints
 from . import callbacks as cbks
 from .utils.layer_utils import container_from_config
-from .utils.generic_utils import Progbar, printv
+from .utils.generic_utils import Progbar
 from .layers import containers
+
+
+logger = logging.getLogger('keras.models')
 
 
 def standardize_y(y):
@@ -70,13 +74,13 @@ def weighted_objective(fn):
         filtered_y_pred = y_pred[weights.nonzero()[:-1]]
         filtered_weights = weights[weights.nonzero()]
         obj_output = fn(filtered_y_true, filtered_y_pred)
-        weighted = filtered_weights * obj_output
+        weighted_obj = filtered_weights * obj_output
         if mask is None:
             # Instead of calling mean() here, we divide by the sum of filtered_weights.
-            return weighted.sum() / filtered_weights.sum()
+            return weighted_obj.sum() / filtered_weights.sum()
         else:
             filtered_mask = mask[weights.nonzero()[:-1]]
-            return weighted.sum() / (filtered_mask * filtered_weights).sum()
+            return weighted_obj.sum() / (filtered_mask * filtered_weights).sum()
     return weighted
 
 
@@ -101,10 +105,10 @@ def standardize_weights(y, sample_weight=None, class_weight=None):
 
 
 def model_from_yaml(yaml_string):
-    '''
+    """
         Returns a model generated from a local yaml file,
         which is either created by hand or from to_yaml method of Sequential or Graph
-    '''
+    """
     import yaml
     config = yaml.load(yaml_string)
     return model_from_config(config)
@@ -153,12 +157,40 @@ def get_function_name(o):
         return o.__name__
 
 
+def objective_symvar(fn):
+    def symvar(y_true, y_pred, mask=None):
+        obj_output = fn(y_true, y_pred)
+        if mask is None:
+            return obj_output.mean(dtype=theano.config.floatX)
+        else:
+            obj_output = obj_output[mask.nonzero()]
+            return obj_output.mean(dtype=theano.config.floatX)
+    return symvar
+
+
 class Model(object):
-    def _fit(self, f, ins, out_labels=[], batch_size=128, nb_epoch=100, verbose=1, callbacks=[],
-             val_f=None, val_ins=None, shuffle=True, metrics=[]):
-        '''
+    def __init__(self):
+        self.loss = None
+        self.weights = None
+        self.optimizer = None
+        self.X_train = None
+        self.X_test = None
+        self.y_train = None
+        self.y_test = None
+        # target of model
+        self.y = None
+        self.class_mode = None
+        self.theano_mode = None
+
+    def _fit(self, f, ins, out_labels=(), batch_size=128, nb_epoch=100, verbose=1, callbacks=(),
+             val_f=None, val_ins=None, shuffle=True, metrics=()):
+        """
             Abstract fit function for f(*ins). Assume that f returns a list, labelled by out_labels.
-        '''
+        """
+        out_labels = list(out_labels)
+        callbacks = list(callbacks)
+        metrics = list(metrics)
+
         do_validation = False
         if val_f and val_ins:
             do_validation = True
@@ -175,8 +207,8 @@ class Model(object):
             callbacks = [history] + callbacks
         callbacks = cbks.CallbackList(callbacks)
 
-        callbacks._set_model(self)
-        callbacks._set_params({
+        callbacks.set_model(self)
+        callbacks.set_params({
             'batch_size': batch_size,
             'nb_epoch': nb_epoch,
             'nb_sample': nb_train_sample,
@@ -204,9 +236,7 @@ class Model(object):
                         If using HDF5 input data, pass shuffle="batch".\n')
                     raise
 
-                batch_logs = {}
-                batch_logs['batch'] = batch_index
-                batch_logs['size'] = len(batch_ids)
+                batch_logs = {'batch': batch_index, 'size': len(batch_ids)}
                 callbacks.on_batch_begin(batch_index, batch_logs)
                 outs = f(*ins_batch)
                 if type(outs) != list:
@@ -235,10 +265,11 @@ class Model(object):
         callbacks.on_train_end()
         return history
 
-    def _predict_loop(self, f, ins, batch_size=128, verbose=0):
-        '''
+    @staticmethod
+    def _predict_loop(f, ins, batch_size=128, verbose=0):
+        """
             Abstract method to loop over some data in batches.
-        '''
+        """
         nb_sample = len(ins[0])
         outs = []
         if verbose == 1:
@@ -260,13 +291,15 @@ class Model(object):
             for i, batch_out in enumerate(batch_outs):
                 outs[i][batch_start:batch_end] = batch_out
             if verbose == 1:
+                # noinspection PyUnboundLocalVariable
                 progbar.update(batch_end)
         return outs
 
-    def _test_loop(self, f, ins, batch_size=128, verbose=0):
-        '''
+    @staticmethod
+    def _test_loop(f, ins, batch_size=128, verbose=0):
+        """
             Abstract method to loop over some data in batches.
-        '''
+        """
         nb_sample = len(ins[0])
         outs = []
         if verbose == 1:
@@ -327,7 +360,7 @@ class Model(object):
 
 
 class Sequential(Model, containers.Sequential):
-    '''
+    """
         Inherits from Model the following methods:
             - _fit
             - _predict
@@ -339,9 +372,26 @@ class Sequential(Model, containers.Sequential):
             - get_input
             - get_weights
             - set_weights
-    '''
+    """
 
-    def compile(self, optimizer, loss, class_mode="categorical", theano_mode=None):
+    def __init__(self, layers=()):
+        # super(Sequential, self).__init__()
+        # self.fit = super(Sequential, self).fit
+        Model.__init__(self)
+        containers.Sequential.__init__(self, layers)
+
+    def compile(self, optimizer, loss, class_mode="categorical", theano_mode=None, with_weights=False):
+        inputs_ = {'optimizer': optimizer, 'loss': loss,
+                   'class_mode': class_mode, 'theano_mode': theano_mode}
+        if with_weights:
+            self.__compile_with_weights(**inputs_)
+            self.fit = self.__fit_weighted
+        else:
+            self.__compile_without_weights(**inputs_)
+            # noinspection PyAttributeOutsideInit
+            self.fit = self.__fit_unweighted
+
+    def __compile_with_weights(self, optimizer, loss, class_mode="categorical", theano_mode=None):
         self.optimizer = optimizers.get(optimizer)
 
         self.loss = objectives.get(loss)
@@ -371,12 +421,14 @@ class Sequential(Model, containers.Sequential):
         self.y.name = 'y'
 
         if class_mode == "categorical":
-            train_accuracy = T.mean(T.eq(T.argmax(self.y, axis=-1), T.argmax(self.y_train, axis=-1)))
-            test_accuracy = T.mean(T.eq(T.argmax(self.y, axis=-1), T.argmax(self.y_test, axis=-1)))
+            train_accuracy = T.mean(T.eq(T.argmax(self.y, axis=-1), T.argmax(self.y_train, axis=-1)),
+                                    dtype=theano.config.floatX)
+            test_accuracy = T.mean(T.eq(T.argmax(self.y, axis=-1), T.argmax(self.y_test, axis=-1)),
+                                   dtype=theano.config.floatX)
 
         elif class_mode == "binary":
-            train_accuracy = T.mean(T.eq(self.y, T.round(self.y_train)))
-            test_accuracy = T.mean(T.eq(self.y, T.round(self.y_test)))
+            train_accuracy = T.mean(T.eq(self.y, T.round(self.y_train)), dtype=theano.config.floatX)
+            test_accuracy = T.mean(T.eq(self.y, T.round(self.y_test)), dtype=theano.config.floatX)
         else:
             raise Exception("Invalid class mode:" + str(class_mode))
         self.class_mode = class_mode
@@ -407,23 +459,92 @@ class Sequential(Model, containers.Sequential):
         self._test_with_acc = theano.function(test_ins, [test_loss, test_accuracy],
                                               allow_input_downcast=True, mode=theano_mode)
 
-    def train_on_batch(self, X, y, accuracy=False, class_weight=None, sample_weight=None):
+    def __compile_without_weights(self, optimizer, loss, class_mode="categorical", theano_mode=None):
+        self.optimizer = optimizers.get(optimizer)
+
+        self.loss = objectives.get(loss)
+        obj_loss = objective_symvar(self.loss)
+
+        # input of model
+        self.X_train = self.get_input(train=True)
+        self.X_test = self.get_input(train=False)
+
+        self.y_train = self.get_output(train=True)
+        self.y_test = self.get_output(train=False)
+
+        # target of model
+        self.y = T.zeros_like(self.y_train)
+
+        self.weights = None
+
+        if hasattr(self.layers[-1], "get_output_mask"):
+            mask = self.layers[-1].get_output_mask()
+        else:
+            mask = None
+        train_loss = obj_loss(self.y, self.y_train, mask)
+        test_loss = obj_loss(self.y, self.y_test, mask)
+
+        train_loss.name = 'train_loss'
+        test_loss.name = 'test_loss'
+        self.y.name = 'y'
+
+        if class_mode == "categorical":
+            train_accuracy = T.mean(T.eq(T.argmax(self.y, axis=-1), T.argmax(self.y_train, axis=-1)),
+                                    dtype=theano.config.floatX)
+            test_accuracy = T.mean(T.eq(T.argmax(self.y, axis=-1), T.argmax(self.y_test, axis=-1)),
+                                   dtype=theano.config.floatX)
+
+        elif class_mode == "binary":
+            train_accuracy = T.mean(T.eq(self.y, T.round(self.y_train)), dtype=theano.config.floatX)
+            test_accuracy = T.mean(T.eq(self.y, T.round(self.y_test)), dtype=theano.config.floatX)
+        else:
+            raise Exception("Invalid class mode:" + str(class_mode))
+        self.class_mode = class_mode
+        self.theano_mode = theano_mode
+
+        for r in self.regularizers:
+            train_loss = r(train_loss)
+        updates = self.optimizer.get_updates(self.params, self.constraints, train_loss)
+        updates += self.updates
+
+        if type(self.X_train) == list:
+            train_ins = self.X_train + self.y
+            test_ins = self.X_test + self.y
+            predict_ins = self.X_test
+        else:
+            train_ins = [self.X_train, self.y]
+            test_ins = [self.X_test, self.y]
+            predict_ins = [self.X_test]
+
+        self._train = theano.function(train_ins, train_loss, updates=updates,
+                                      allow_input_downcast=True, mode=theano_mode)
+        self._train_with_acc = theano.function(train_ins, [train_loss, train_accuracy], updates=updates,
+                                               allow_input_downcast=True, mode=theano_mode)
+        self._predict = theano.function(predict_ins, self.y_test,
+                                        allow_input_downcast=True, mode=theano_mode)
+        self._test = theano.function(test_ins, test_loss,
+                                     allow_input_downcast=True, mode=theano_mode)
+        self._test_with_acc = theano.function(test_ins, [test_loss, test_accuracy],
+                                              allow_input_downcast=True, mode=theano_mode)
+
+    def __prepare_input(self, X, y, class_weight=None, sample_weight=None):
         X = standardize_X(X)
         y = standardize_y(y)
-        sample_weight = standardize_weights(y, class_weight=class_weight, sample_weight=sample_weight)
+        if self.weights is not None:
+            sample_weight = standardize_weights(y, class_weight=class_weight, sample_weight=sample_weight)
+            return X + [y, sample_weight]
+        else:
+            return X + [y]
 
-        ins = X + [y, sample_weight]
+    def train_on_batch(self, X, y, accuracy=False, class_weight=None, sample_weight=None):
+        ins = self.__prepare_input(X, y, class_weight=class_weight, sample_weight=sample_weight)
         if accuracy:
             return self._train_with_acc(*ins)
         else:
             return self._train(*ins)
 
     def test_on_batch(self, X, y, accuracy=False, sample_weight=None):
-        X = standardize_X(X)
-        y = standardize_y(y)
-        sample_weight = standardize_weights(y, sample_weight=sample_weight)
-
-        ins = X + [y, sample_weight]
+        ins = self.__prepare_input(X, y, sample_weight=sample_weight)
         if accuracy:
             return self._test_with_acc(*ins)
         else:
@@ -433,9 +554,9 @@ class Sequential(Model, containers.Sequential):
         ins = standardize_X(X)
         return self._predict(*ins)
 
-    def fit(self, X, y, batch_size=128, nb_epoch=100, verbose=1, callbacks=[],
-            validation_split=0., validation_data=None, shuffle=True, show_accuracy=False,
-            class_weight=None, sample_weight=None):
+    def __fit_weighted(self, X, y, batch_size=128, nb_epoch=100, verbose=1, callbacks=(),
+                       validation_split=0., validation_data=None, shuffle=True, show_accuracy=False,
+                       class_weight=None, sample_weight=None):
 
         X = standardize_X(X)
         y = standardize_y(y)
@@ -459,8 +580,9 @@ class Sequential(Model, containers.Sequential):
                 y_val = standardize_y(y_val)
                 sample_weight_val = standardize_weights(y_val, sample_weight=sample_weight_val)
             else:
-                raise Exception("Invalid format for validation data; provide a tuple (X_val, y_val) or (X_val, y_val, sample_weight). \
-                    X_val may be a numpy array or a list of numpy arrays depending on your model input.")
+                raise Exception("Invalid format for validation data; provide a tuple (X_val, y_val) "
+                                "or (X_val, y_val, sample_weight)."
+                                "X_val may be a numpy array or a list of numpy arrays depending on your model input.")
             val_ins = X_val + [y_val, sample_weight_val]
 
         elif 0 < validation_split < 1:
@@ -468,7 +590,8 @@ class Sequential(Model, containers.Sequential):
             X, X_val = (slice_X(X, 0, split_at), slice_X(X, split_at))
             y, y_val = (slice_X(y, 0, split_at), slice_X(y, split_at))
             if sample_weight is not None:
-                sample_weight, sample_weight_val = (slice_X(sample_weight, 0, split_at), slice_X(sample_weight, split_at))
+                sample_weight, sample_weight_val = (slice_X(sample_weight, 0, split_at),
+                                                    slice_X(sample_weight, split_at))
                 sample_weight_val = standardize_weights(y_val, sample_weight=sample_weight_val)
             else:
                 sample_weight_val = np.ones(y_val.shape[:-1] + (1,))
@@ -489,6 +612,71 @@ class Sequential(Model, containers.Sequential):
                          val_f=val_f, val_ins=val_ins,
                          shuffle=shuffle, metrics=metrics)
 
+    def __fit_unweighted(self, X, y, batch_size=128, nb_epoch=100, verbose=1, callbacks=(),
+                         validation_split=0., validation_data=None, shuffle=True, show_accuracy=False):
+        assert self.weights is None
+        X = standardize_X(X)
+        y = standardize_y(y)
+        val_f = None
+        val_ins = None
+        if validation_data or validation_split:
+            if show_accuracy:
+                val_f = self._test_with_acc
+            else:
+                val_f = self._test
+
+        if validation_data:
+            if len(validation_data) == 2:
+                X_val, y_val = validation_data
+            else:
+                raise Exception("Invalid format for validation data; provide a tuple (X_val, y_val) or (X_val, y_val, "
+                                "sample_weight). X_val may be a numpy array or "
+                                "a list of numpy arrays depending on your model input.")
+            val_ins = self.__prepare_input(X_val, y_val)
+        elif 0 < validation_split < 1:
+            split_at = int(len(X[0]) * (1 - validation_split))
+            X, X_val = (slice_X(X, 0, split_at), slice_X(X, split_at))
+            y, y_val = (slice_X(y, 0, split_at), slice_X(y, split_at))
+            val_ins = X_val + [y_val]
+
+        if show_accuracy:
+            f = self._train_with_acc
+            out_labels = ['loss', 'acc']
+        else:
+            f = self._train
+            out_labels = ['loss']
+
+        ins = X + [y]
+        metrics = ['loss', 'acc', 'val_loss', 'val_acc']
+        return self._fit(f, ins, out_labels=out_labels, batch_size=batch_size, nb_epoch=nb_epoch,
+                         verbose=verbose, callbacks=callbacks,
+                         val_f=val_f, val_ins=val_ins,
+                         shuffle=shuffle, metrics=metrics)
+
+    def fit(self, X, y, batch_size=128, nb_epoch=100, verbose=1, callbacks=(),
+            validation_split=0., validation_data=None, shuffle=True, show_accuracy=False,
+            class_weight=None, sample_weight=None):
+        """
+        :type X: numpy.ndarray
+        :param X: Training feature vectors.
+        :type y: numpy.ndarray
+        :param y: labels of training data.
+        :param batch_size: batch size, default 128
+        :type batch_size: int
+        :param nb_epoch: number of training epochs.
+        :type nb_epoch: int
+        :param verbose: verbose output or not
+        :param callbacks: a list of callback instances of type keras.callbacks.Callback
+        :param validation_split: proportion of validation data to split
+        :param validation_data: validation data
+        :param shuffle: shuffle or not at each batch/epoch
+        :param show_accuracy: show training or validation accuracies or not during training
+
+        :return:
+        """
+        raise NotImplemented('This function should be reassigned in the compile function. '
+                             'Please compile the graph first.')
+
     def predict(self, X, batch_size=128, verbose=0):
         X = standardize_X(X)
         return self._predict_loop(self._predict, X, batch_size, verbose)[0]
@@ -507,11 +695,7 @@ class Sequential(Model, containers.Sequential):
             return (proba > 0.5).astype('int32')
 
     def evaluate(self, X, y, batch_size=128, show_accuracy=False, verbose=1, sample_weight=None):
-        X = standardize_X(X)
-        y = standardize_y(y)
-        sample_weight = standardize_weights(y, sample_weight=sample_weight)
-
-        ins = X + [y, sample_weight]
+        ins = self.__prepare_input(X, y, sample_weight=sample_weight)
         if show_accuracy:
             f = self._test_with_acc
         else:
@@ -553,10 +737,10 @@ class Sequential(Model, containers.Sequential):
         f.close()
 
     def load_weights(self, filepath):
-        '''
+        """
             This method does not make use of Sequential.set_weights()
             for backwards compatibility.
-        '''
+        """
         # Loads weights from HDF5 file
         import h5py
         f = h5py.File(filepath)
@@ -573,6 +757,9 @@ class Sequential(Model, containers.Sequential):
 
 
 class Graph(Model, containers.Graph):
+    def __init__(self):
+        super(Graph, self).__init__()
+
     def compile(self, optimizer, loss, theano_mode=None):
         # loss is a dictionary mapping output name to loss functions
         ys = []

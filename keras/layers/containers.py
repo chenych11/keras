@@ -18,7 +18,7 @@ class Sequential(Layer):
         - supports_masked_input
     '''
 
-    def __init__(self, layers=[]):
+    def __init__(self, layers=()):
         super(Sequential, self).__init__()
         self.layers = []
         self.params = []
@@ -29,7 +29,11 @@ class Sequential(Layer):
         for layer in layers:
             self.add(layer)
 
+    # noinspection PyMethodOverriding
     def set_previous(self, layer):
+        """
+        :param layer: a list/tuple of Layers
+        """
         self.layers[0].previous = layer
 
     def add(self, layer):
@@ -122,7 +126,7 @@ class Graph(Layer):
     def nb_output(self):
         return len(self.outputs)
 
-    def set_previous(self, layer, connection_map={}):
+    def set_previous(self, layer, connection_map=None):
         if self.nb_input != layer.nb_output:
             raise Exception('Cannot connect layers: input count does not match output count.')
         if self.nb_input == 1:
@@ -169,7 +173,7 @@ class Graph(Layer):
         self.inputs[name] = layer
         self.input_config.append({'name': name, 'ndim': ndim, 'dtype': dtype})
 
-    def add_node(self, layer, name, input=None, inputs=[],
+    def add_node(self, layer, name, input=None, inputs=None,
                  merge_mode='concat', concat_axis=-1, create_output=False):
         if hasattr(layer, 'set_name'):
             layer.set_name(name)
@@ -212,7 +216,7 @@ class Graph(Layer):
         if create_output:
             self.add_output(name, input=name)
 
-    def add_output(self, name, input=None, inputs=[],
+    def add_output(self, name, input=None, inputs=None,
                    merge_mode='concat', concat_axis=-1):
         if name in self.output_order:
             raise Exception('Duplicate output identifier: ' + name)

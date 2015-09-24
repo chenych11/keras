@@ -9,33 +9,36 @@ from .utils.generic_utils import Progbar
 
 
 class CallbackList(object):
-    def __init__(self, callbacks=[], queue_length=10):
-        self.callbacks = [c for c in callbacks]
+    def __init__(self, callbacks=(), queue_length=10):
+        self.callbacks = list(callbacks)
         self.queue_length = queue_length
 
     def append(self, callback):
         self.callbacks.append(callback)
 
-    def _set_params(self, params):
+    def set_params(self, params):
         for callback in self.callbacks:
-            callback._set_params(params)
+            callback.set_params(params)
 
-    def _set_model(self, model):
+    def set_model(self, model):
         for callback in self.callbacks:
-            callback._set_model(model)
+            callback.set_model(model)
 
-    def on_epoch_begin(self, epoch, logs={}):
+    def on_epoch_begin(self, epoch, logs=None):
+        logs = {} if logs is None else logs
         for callback in self.callbacks:
             callback.on_epoch_begin(epoch, logs)
         self._delta_t_batch = 0.
         self._delta_ts_batch_begin = deque([], maxlen=self.queue_length)
         self._delta_ts_batch_end = deque([], maxlen=self.queue_length)
 
-    def on_epoch_end(self, epoch, logs={}):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = {} if logs is None else logs
         for callback in self.callbacks:
             callback.on_epoch_end(epoch, logs)
 
-    def on_batch_begin(self, batch, logs={}):
+    def on_batch_begin(self, batch, logs=None):
+        logs = {} if logs is None else logs
         t_before_callbacks = time.time()
         for callback in self.callbacks:
             callback.on_batch_begin(batch, logs)
@@ -46,7 +49,8 @@ class CallbackList(object):
                           'to the batch update (%f). Check your callbacks.' % delta_t_median)
         self._t_enter_batch = time.time()
 
-    def on_batch_end(self, batch, logs={}):
+    def on_batch_end(self, batch, logs=None):
+        logs = {} if logs is None else logs
         self._delta_t_batch = time.time() - self._t_enter_batch
         t_before_callbacks = time.time()
         for callback in self.callbacks:
@@ -57,11 +61,13 @@ class CallbackList(object):
             warnings.warn('Method on_batch_end() is slow compared '
                           'to the batch update (%f). Check your callbacks.' % delta_t_median)
 
-    def on_train_begin(self, logs={}):
+    def on_train_begin(self, logs=None):
+        logs = {} if logs is None else logs
         for callback in self.callbacks:
             callback.on_train_begin(logs)
 
-    def on_train_end(self, logs={}):
+    def on_train_end(self, logs=None):
+        logs = {} if logs is None else logs
         for callback in self.callbacks:
             callback.on_train_end(logs)
 
@@ -69,38 +75,43 @@ class CallbackList(object):
 class Callback(object):
 
     def __init__(self):
-        pass
+        self.params = None
+        self.model = None
 
-    def _set_params(self, params):
+    def set_params(self, params):
         self.params = params
 
-    def _set_model(self, model):
+    def set_model(self, model):
         self.model = model
 
-    def on_epoch_begin(self, epoch, logs={}):
+    def on_epoch_begin(self, epoch, logs=None):
         pass
 
-    def on_epoch_end(self, epoch, logs={}):
+    def on_epoch_end(self, epoch, logs=None):
         pass
 
-    def on_batch_begin(self, batch, logs={}):
+    def on_batch_begin(self, batch, logs=None):
         pass
 
-    def on_batch_end(self, batch, logs={}):
+    def on_batch_end(self, batch, logs=None):
         pass
 
-    def on_train_begin(self, logs={}):
+    def on_train_begin(self, logs=None):
         pass
 
-    def on_train_end(self, logs={}):
+    def on_train_end(self, logs=None):
+        """
+        :param logs: dict or None
+        :return:
+        """
         pass
 
 
 class BaseLogger(Callback):
-    def on_train_begin(self, logs={}):
+    def on_train_begin(self, logs=None):
         self.verbose = self.params['verbose']
 
-    def on_epoch_begin(self, epoch, logs={}):
+    def on_epoch_begin(self, epoch, logs=None):
         if self.verbose:
             print('Epoch %d' % epoch)
             self.progbar = Progbar(target=self.params['nb_sample'],
@@ -108,11 +119,12 @@ class BaseLogger(Callback):
         self.seen = 0
         self.totals = {}
 
-    def on_batch_begin(self, batch, logs={}):
+    def on_batch_begin(self, batch, logs=None):
         if self.seen < self.params['nb_sample']:
             self.log_values = []
 
-    def on_batch_end(self, batch, logs={}):
+    def on_batch_end(self, batch, logs=None):
+        logs = {} if logs is None else logs
         batch_size = logs.get('size', 0)
         self.seen += batch_size
 
@@ -129,7 +141,8 @@ class BaseLogger(Callback):
         if self.verbose and self.seen < self.params['nb_sample']:
             self.progbar.update(self.seen, self.log_values)
 
-    def on_epoch_end(self, epoch, logs={}):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = {} if logs is None else logs
         for k in self.params['metrics']:
             if k in self.totals:
                 self.log_values.append((k, self.totals[k] / self.seen))
@@ -141,15 +154,17 @@ class BaseLogger(Callback):
 
 class History(Callback):
 
-    def on_train_begin(self, logs={}):
+    def on_train_begin(self, logs=None):
+        # logs = {} if logs is None else logs
         self.epoch = []
         self.history = {}
 
-    def on_epoch_begin(self, epoch, logs={}):
+    def on_epoch_begin(self, epoch, logs=None):
         self.seen = 0
         self.totals = {}
 
-    def on_batch_end(self, batch, logs={}):
+    def on_batch_end(self, batch, logs=None):
+        logs = {} if logs is None else logs
         batch_size = logs.get('size', 0)
         self.seen += batch_size
         for k, v in logs.items():
@@ -158,7 +173,8 @@ class History(Callback):
             else:
                 self.totals[k] = v * batch_size
 
-    def on_epoch_end(self, epoch, logs={}):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = {} if logs is None else logs
         self.epoch.append(epoch)
         for k, v in self.totals.items():
             if k not in self.history:
@@ -181,7 +197,8 @@ class ModelCheckpoint(Callback):
         self.save_best_only = save_best_only
         self.best = np.Inf
 
-    def on_epoch_end(self, epoch, logs={}):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = {} if logs is None else logs
         if self.save_best_only:
             current = logs.get(self.monitor)
             if current is None:
@@ -212,7 +229,8 @@ class EarlyStopping(Callback):
         self.best = np.Inf
         self.wait = 0
 
-    def on_epoch_end(self, epoch, logs={}):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = {} if logs is None else logs
         current = logs.get(self.monitor)
         if current is None:
             warnings.warn("Early stopping requires %s available!" % (self.monitor), RuntimeWarning)
@@ -230,13 +248,15 @@ class EarlyStopping(Callback):
 
 class RemoteMonitor(Callback):
     def __init__(self, root='http://localhost:9000'):
+        super(RemoteMonitor, self).__init__()
         self.root = root
 
-    def on_epoch_begin(self, epoch, logs={}):
+    def on_epoch_begin(self, epoch, logs=None):
         self.seen = 0
         self.totals = {}
 
-    def on_batch_end(self, batch, logs={}):
+    def on_batch_end(self, batch, logs=None):
+        logs = {} if logs is None else logs
         batch_size = logs.get('size', 0)
         self.seen += batch_size
         for k, v in logs.items():
@@ -245,7 +265,8 @@ class RemoteMonitor(Callback):
             else:
                 self.totals[k] = v * batch_size
 
-    def on_epoch_end(self, epoch, logs={}):
+    def on_epoch_end(self, epoch, logs=None):
+        logs = {} if logs is None else logs
         import requests
         send = {}
         send['epoch'] = epoch
@@ -270,5 +291,6 @@ class LearningRateScheduler(Callback):
         super(LearningRateScheduler, self).__init__()
         self.schedule = schedule
 
-    def on_epoch_begin(self, epoch, logs={}):
+    def on_epoch_begin(self, epoch, logs=None):
+        logs = {} if logs is None else logs
         self.model.optimizer.lr.set_value(self.schedule(epoch))
