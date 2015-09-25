@@ -85,6 +85,8 @@ class Sequential(Layer):
         return {"name": self.__class__.__name__,
                 "layers": [layer.get_config() for layer in self.layers]}
 
+    def count_params(self):
+        return sum([layer.count_params() for layer in self.layers])
 
 class Graph(Layer):
     """
@@ -251,3 +253,6 @@ class Graph(Layer):
                 "input_order": self.input_order,
                 "output_order": self.output_order,
                 "nodes": dict([(c["name"], self.nodes[c["name"]].get_config()) for c in self.node_config])}
+
+    def count_params(self):
+        return sum([layer.count_params() for layer in self.nodes.values()])

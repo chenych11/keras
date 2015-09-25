@@ -11,6 +11,7 @@ from ..utils.generic_utils import make_tuple
 from ..regularizers import ActivityRegularizer, Regularizer
 
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+# noinspection PyUnresolvedReferences
 from six.moves import zip
 
 
@@ -110,6 +111,8 @@ class Layer(object):
         for i in range(len(self.params)):
             self.params[i].name = '%s_p%d' % (name, i)
 
+    def count_params(self):
+        return sum([np.prod(p.shape.eval()) for p in self.params])
 
 class MaskedLayer(Layer):
     """
@@ -159,12 +162,44 @@ class Masking(MaskedLayer):
         return {"name": self.__class__.__name__,
                 "mask_value": self.mask_value}
 
+class TimeDistributedMerge(Layer):
+    def __init__(self, mode='sum'):
+        '''
+        Sum/multiply/avearge over a time distributed layer's outputs.
+        mode: {'sum', 'mul', 'ave'}
+        Tensor input dimensions:   (nb_sample, shared_dimension, input_dim)
+        Tensor output dimensions:  (nb_sample, output_dim)
+        '''
+        self.mode = mode
+        self.params = []
+        self.regularizers = []
+        self.constraints = []
+        self.updates = []
+
+    def get_output(self, train=False):
+        X = self.get_input(train)
+        if self.mode == 'sum' or self.mode == 'ave':
+            s = theano.tensor.sum(X, axis=1)
+            if self.mode == 'ave':
+                s /= X.shape[1]
+            return s
+        elif self.mode == 'mul':
+            s = theano.tensor.mul(X, axis=1)
+            return s
+        else:
+            raise Exception('Unknown merge mode')
+
+    def get_config(self):
+        return {"name": self.__class__.__name__,
+                "mode": self.mode}
+
 
 class Merge(Layer):
     def __init__(self, layers, mode='sum', concat_axis=-1):
         """ Merge the output of a list of layers or containers into a single tensor.
-            mode: {'sum', 'mul', 'concat'}
+            mode: {'sum', 'mul', 'concat', 'ave'}
         """
+        super(Merge, self).__init__()
         if len(layers) < 2:
             raise Exception("Please specify two or more input layers (or containers) to merge")
         self.mode = mode
@@ -188,10 +223,12 @@ class Merge(Layer):
         return self.params, self.regularizers, self.constraints, self.updates
 
     def get_output(self, train=False):
-        if self.mode == 'sum':
+        if self.mode == 'sum' or self.mode == 'ave':
             s = self.layers[0].get_output(train)
             for i in range(1, len(self.layers)):
                 s += self.layers[i].get_output(train)
+            if self.mode == 'ave':
+                s /= len(self.layers)
             return s
         elif self.mode == 'concat':
             inputs = [self.layers[i].get_output(train) for i in range(len(self.layers))]
