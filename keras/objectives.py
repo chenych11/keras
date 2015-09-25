@@ -2,6 +2,7 @@ from __future__ import absolute_import
 import theano
 import theano.tensor as T
 import numpy as np
+# noinspection PyUnresolvedReferences
 from six.moves import range
 
 if theano.config.floatX == 'float64':

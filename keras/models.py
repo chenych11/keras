@@ -158,7 +158,7 @@ def get_function_name(o):
         return o.__name__
 
 
-def objective_symvar(fn):
+def objective_fnc(fn):
     def symvar(y_true, y_pred, mask=None):
         obj_output = fn(y_true, y_pred)
         if mask is None:
@@ -197,6 +197,7 @@ class Model(object):
         out_labels = list(out_labels)
         callbacks = list(callbacks)
         metrics = list(metrics)
+        logger.debug('out_labels: %s' % str(out_labels))
 
         do_validation = False
         if val_f and val_ins:
@@ -457,22 +458,25 @@ class Sequential(Model, containers.Sequential):
             test_ins = [self.X_test, self.y, self.weights]
             predict_ins = [self.X_test]
 
-        self._train = theano.function(train_ins, train_loss, updates=updates,
-                                      allow_input_downcast=True, mode=theano_mode)
-        self._train_with_acc = theano.function(train_ins, [train_loss, train_accuracy], updates=updates,
-                                               allow_input_downcast=True, mode=theano_mode)
-        self._predict = theano.function(predict_ins, self.y_test,
-                                        allow_input_downcast=True, mode=theano_mode)
-        self._test = theano.function(test_ins, test_loss,
-                                     allow_input_downcast=True, mode=theano_mode)
-        self._test_with_acc = theano.function(test_ins, [test_loss, test_accuracy],
-                                              allow_input_downcast=True, mode=theano_mode)
+        self.__compile_fncs(train_ins, train_loss, train_accuracy, test_ins, test_loss, test_accuracy,
+                       predict_ins, updates, theano_mode)
+
+        # self._train = theano.function(train_ins, train_loss, updates=updates,
+        #                               allow_input_downcast=True, mode=theano_mode)
+        # self._train_with_acc = theano.function(train_ins, [train_loss, train_accuracy], updates=updates,
+        #                                        allow_input_downcast=True, mode=theano_mode)
+        # self._predict = theano.function(predict_ins, self.y_test,
+        #                                 allow_input_downcast=True, mode=theano_mode)
+        # self._test = theano.function(test_ins, test_loss,
+        #                              allow_input_downcast=True, mode=theano_mode)
+        # self._test_with_acc = theano.function(test_ins, [test_loss, test_accuracy],
+        #                                       allow_input_downcast=True, mode=theano_mode)
 
     def __compile_without_weights(self, optimizer, loss, class_mode="categorical", theano_mode=None):
         self.optimizer = optimizers.get(optimizer)
 
         self.loss = objectives.get(loss)
-        obj_loss = objective_symvar(self.loss)
+        obj_loss = objective_fnc(self.loss)
 
         # input of model
         self.X_train = self.get_input(train=True)
@@ -525,16 +529,30 @@ class Sequential(Model, containers.Sequential):
             test_ins = [self.X_test, self.y]
             predict_ins = [self.X_test]
 
+        self.__compile_fncs(train_ins, train_loss, train_accuracy, test_ins, test_loss, test_accuracy,
+                       predict_ins, updates, theano_mode)
+
+    def __compile_fncs(self, train_ins, train_loss, train_accuracy, test_ins, test_loss, test_accuracy,
+                       predict_ins, updates, theano_mode):
         self._train = theano.function(train_ins, train_loss, updates=updates,
                                       allow_input_downcast=True, mode=theano_mode)
+        self._train.out_labels = ['loss']
+
         self._train_with_acc = theano.function(train_ins, [train_loss, train_accuracy], updates=updates,
                                                allow_input_downcast=True, mode=theano_mode)
+        self._train_with_acc.out_labels = ['loss', 'acc']
+
         self._predict = theano.function(predict_ins, self.y_test,
                                         allow_input_downcast=True, mode=theano_mode)
+        self._predict.out_labels = ['predicted']
+
         self._test = theano.function(test_ins, test_loss,
                                      allow_input_downcast=True, mode=theano_mode)
+        self._test.out_labels = ['test_loss']
+
         self._test_with_acc = theano.function(test_ins, [test_loss, test_accuracy],
                                               allow_input_downcast=True, mode=theano_mode)
+        self._test_with_acc.out_labels = ['test_loss', 'test_acc']
 
     def __prepare_input(self, X, y, class_weight=None, sample_weight=None):
         X = standardize_X(X)
@@ -608,15 +626,14 @@ class Sequential(Model, containers.Sequential):
 
         if show_accuracy:
             f = self._train_with_acc
-            out_labels = ['loss', 'acc']
         else:
             f = self._train
-            out_labels = ['loss']
 
+        # out_labels = f.out_labels
         sample_weight = standardize_weights(y, class_weight=class_weight, sample_weight=sample_weight)
         ins = X + [y, sample_weight]
         metrics = ['loss', 'acc', 'val_loss', 'val_acc']
-        return self._fit(f, ins, out_labels=out_labels, batch_size=batch_size, nb_epoch=nb_epoch,
+        return self._fit(f, ins, out_labels=f.out_labels, batch_size=batch_size, nb_epoch=nb_epoch,
                          verbose=verbose, callbacks=callbacks,
                          val_f=val_f, val_ins=val_ins,
                          shuffle=shuffle, metrics=metrics)
@@ -650,14 +667,15 @@ class Sequential(Model, containers.Sequential):
 
         if show_accuracy:
             f = self._train_with_acc
-            out_labels = ['loss', 'acc']
+            # out_labels = ['loss', 'acc']
         else:
             f = self._train
-            out_labels = ['loss']
+            # out_labels = ['loss']
 
         ins = X + [y]
         metrics = ['loss', 'acc', 'val_loss', 'val_acc']
-        return self._fit(f, ins, out_labels=out_labels, batch_size=batch_size, nb_epoch=nb_epoch,
+        # logger.debug('out labels: %s' % str(f.out_labels))
+        return self._fit(f, ins, out_labels=f.out_labels, batch_size=batch_size, nb_epoch=nb_epoch,
                          verbose=verbose, callbacks=callbacks,
                          val_f=val_f, val_ins=val_ins,
                          shuffle=shuffle, metrics=metrics)
