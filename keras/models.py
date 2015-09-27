@@ -173,6 +173,7 @@ class Model(object):
     def __init__(self):
         self.loss = None
         self.weights = None
+        self.all_metrics = None
         self.optimizer = None
         self.X_train = None
         self.X_test = None
@@ -189,31 +190,42 @@ class Model(object):
         self._test = None
         self._test_with_acc = None
 
-    def _fit(self, f, ins, out_labels=(), batch_size=128, nb_epoch=100, verbose=1, callbacks=(),
-             val_f=None, val_ins=None, shuffle=True, metrics=()):
+    def _fit(self, f, ins, callbacks, val_f=None, val_ins=None, metrics=(),
+             batch_size=128, nb_epoch=100, extra_callbacks=(), shuffle=True, verbose=1):
         """
             Abstract fit function for f(*ins). Assume that f returns a list, labelled by out_labels.
         """
-        out_labels = list(out_labels)
-        callbacks = list(callbacks)
-        metrics = list(metrics)
-        logger.debug('out_labels: %s' % str(out_labels))
+        if f.n_returned_outputs == 0:
+            raise ValueError('We can not evaluate the outputs with none outputs')
+
+        standardize_outputs = lambda outputs: [outputs] if f.n_returned_outputs == 1 else outputs
+        extra_callbacks = list(extra_callbacks)
+        nb_train_sample = len(ins[0])
+
+        # logger.debug('out_labels: %s' % str(f.out_labels))
 
         do_validation = False
         if val_f and val_ins:
             do_validation = True
-            if verbose:
-                print("Train on %d samples, validate on %d samples" % (len(ins[0]), len(val_ins[0])))
-
-        nb_train_sample = len(ins[0])
-        index_array = np.arange(nb_train_sample)
-
-        history = cbks.History()
-        if verbose:
-            callbacks = [history, cbks.BaseLogger()] + callbacks
+            pre_train_info = "Train on %d samples, validate on %d samples" % (len(ins[0]), len(val_ins[0]))
         else:
-            callbacks = [history] + callbacks
-        callbacks = cbks.CallbackList(callbacks)
+            pre_train_info = "Train on %d samples." % len(ins[0])
+
+        if verbose:
+            logger.info(pre_train_info)
+
+        index_array = np.arange(nb_train_sample)
+        #  TODO: any good idea to have history as mandatory callback?
+        # There is problems for setting history as mandatory callback, for not all metrics are calculated
+        # as the way in the History class. So I deleted this function for now and ask the user to define
+        # what the callback is.
+        # history = cbks.History()
+        # callbacks = [history, cbks.BaseLogger()] + callbacks if verbose else [history] + callbacks
+        callbacks_ = callbacks
+        callbacks = cbks.CallbackList([callbacks_] + extra_callbacks)
+
+        metrics_ = ['val_'+x for x in metrics] + list(metrics)
+        cndt_metrics = [m for m in self.all_metrics if m in metrics_]
 
         callbacks.set_model(self)
         callbacks.set_params({
@@ -222,7 +234,7 @@ class Model(object):
             'nb_sample': nb_train_sample,
             'verbose': verbose,
             'do_validation': do_validation,
-            'metrics': metrics,
+            'metrics': list(cndt_metrics),
         })
         callbacks.on_train_begin()
 
@@ -247,12 +259,9 @@ class Model(object):
 
                 batch_logs = {'batch': batch_index, 'size': len(batch_ids)}
                 callbacks.on_batch_begin(batch_index, batch_logs)
-                outs = f(*ins_batch)
-                if type(outs) != list:
-                    outs = [outs]
-                for l, o in zip(out_labels, outs):
-                    batch_logs[l] = o
-
+                outs = standardize_outputs(f(*ins_batch))
+                _logs = [(label, value) for label, value in zip(f.out_labels, outs)]
+                batch_logs.update(_logs)
                 callbacks.on_batch_end(batch_index, batch_logs)
 
                 if batch_index == len(batches) - 1:  # last batch
@@ -260,18 +269,17 @@ class Model(object):
                     if do_validation:
                         # replace with self._evaluate
                         val_outs = self._test_loop(val_f, val_ins, batch_size=batch_size, verbose=0)
-                        if type(val_outs) != list:
-                            val_outs = [val_outs]
-                        # same labels assumed
-                        for l, o in zip(out_labels, val_outs):
-                            epoch_logs['val_' + l] = o
+                        val_outs = standardize_outputs(val_outs)
+                        _logs = [('val_'+label, value) for label, value in zip(val_f.out_labels, val_outs)]
+                        epoch_logs.update(_logs)
+                        # logger.debug('\nEpoch logs: %s\n' % str(epoch_logs))
 
             callbacks.on_epoch_end(epoch, epoch_logs)
             if self.stop_training:
                 break
 
         callbacks.on_train_end()
-        return history
+        return callbacks_
 
     @staticmethod
     def _predict_loop(f, ins, batch_size=128, verbose=0):
@@ -310,7 +318,8 @@ class Model(object):
         """
         progbar = None
         nb_sample = len(ins[0])
-        outs = []
+        outs = [[] for _ in range(f.n_returned_outputs)]
+        batch_info = []
         if verbose == 1:
             progbar = Progbar(target=nb_sample)
         batches = make_batches(nb_sample, batch_size)
@@ -320,21 +329,14 @@ class Model(object):
             ins_batch = slice_X(ins, batch_ids)
 
             batch_outs = f(*ins_batch)
-            if type(batch_outs) == list:
-                if batch_index == 0:
-                    for _ in enumerate(batch_outs):
-                        outs.append(0.)
-                for i, batch_out in enumerate(batch_outs):
-                    outs[i] += batch_out * len(batch_ids)
-            else:
-                if batch_index == 0:
-                    outs.append(0.)
-                outs[0] += batch_outs * len(batch_ids)
+            for idx, v in enumerate(batch_outs):
+                outs[idx].append(v)
+            batch_info.append(len(batch_ids))
 
             if verbose == 1:
                 progbar.update(batch_end)
-        for i, out in enumerate(outs):
-            outs[i] /= nb_sample
+
+        outs = f.summarize_outputs(outs, batch_info)
         return outs
 
     def get_config(self, verbose=0):
@@ -459,7 +461,7 @@ class Sequential(Model, containers.Sequential):
             predict_ins = [self.X_test]
 
         self.__compile_fncs(train_ins, train_loss, train_accuracy, test_ins, test_loss, test_accuracy,
-                       predict_ins, updates, theano_mode)
+                            predict_ins, updates, theano_mode)
 
         # self._train = theano.function(train_ins, train_loss, updates=updates,
         #                               allow_input_downcast=True, mode=theano_mode)
@@ -530,7 +532,7 @@ class Sequential(Model, containers.Sequential):
             predict_ins = [self.X_test]
 
         self.__compile_fncs(train_ins, train_loss, train_accuracy, test_ins, test_loss, test_accuracy,
-                       predict_ins, updates, theano_mode)
+                            predict_ins, updates, theano_mode)
 
     def __compile_fncs(self, train_ins, train_loss, train_accuracy, test_ins, test_loss, test_accuracy,
                        predict_ins, updates, theano_mode):
@@ -548,11 +550,58 @@ class Sequential(Model, containers.Sequential):
 
         self._test = theano.function(test_ins, test_loss,
                                      allow_input_downcast=True, mode=theano_mode)
-        self._test.out_labels = ['test_loss']
+        self._test.out_labels = ['loss']
 
         self._test_with_acc = theano.function(test_ins, [test_loss, test_accuracy],
                                               allow_input_downcast=True, mode=theano_mode)
-        self._test_with_acc.out_labels = ['test_loss', 'test_acc']
+        self._test_with_acc.out_labels = ['loss', 'acc']
+
+        self.all_metrics = ['loss', 'acc', 'val_loss', 'val_acc']
+
+        # def __get_metrics_values(f, outs, metrics, prefix=''):
+        #     ret = []
+        #     out_labels = f.out_labels
+        #     metrics = set(metrics)
+        #     all_mtrx = set(self.all_metrics)
+        #     if not metrics.issubset(all_mtrx):
+        #         logger.warn('Specified UNKNOWN metrics ignored')
+        #         metrics.difference_update(metrics.difference(all_mtrx))
+        #
+        #     label2idx = dict((l, idx) for idx, l in enumerate(out_labels))
+        #     for mtrx in metrics:
+        #         idx = label2idx[mtrx]
+        #         ret.append((prefix+mtrx, outs[idx]))
+        #     return ret
+
+        def __summary_outputs(outs, batch_sizes):
+            """
+                :param outs: outputs of the _test* function. It is a list, and each element a list of
+                values of the outputs of the _test* function on corresponding batch.
+                :type outs: list
+                :param batch_sizes: batch sizes. A list with the same length with outs. Each element
+                is a size of corresponding batch.
+                :type batch_sizes: list
+                Aggregate outputs of batches as if the test function evaluates
+                the metric values on the union of the batches.
+                Note this function must be redefined for each specific problem
+            """
+            out = np.array(outs, dtype=theano.config.floatX)
+            batch_size = np.array(batch_sizes, dtype=theano.config.floatX)
+            return np.sum(out * batch_size, axis=1)/batch_size.sum()
+
+        # self._train_with_acc.get_metrics_values = lambda outs, metrics, prefix='': \
+        #     __get_metrics_values(self._train_with_acc, outs, metrics, prefix)
+        # self._train.get_metrics_values = lambda outs, metrics, prefix='': \
+        #     __get_metrics_values(self._train, outs, metrics, prefix)
+        # self._test.get_metrics_values = lambda outs, metrics, prefix='': \
+        #     __get_metrics_values(self._test, outs, metrics, prefix)
+        # self._test_with_acc.get_metrics_values = lambda outs, metrics, prefix='': \
+        #     __get_metrics_values(self._test_with_acc, outs, metrics, prefix)
+
+        self._train_with_acc.summarize_outputs = __summary_outputs
+        self._train.summarize_outputs = __summary_outputs
+        self._test.summarize_outputs = __summary_outputs
+        self._test_with_acc.summarize_outputs = __summary_outputs
 
     def __prepare_input(self, X, y, class_weight=None, sample_weight=None):
         X = standardize_X(X)
@@ -581,9 +630,9 @@ class Sequential(Model, containers.Sequential):
         ins = standardize_X(X)
         return self._predict(*ins)
 
-    def __fit_weighted(self, X, y, batch_size=128, nb_epoch=100, verbose=1, callbacks=(),
-                       validation_split=0., validation_data=None, shuffle=True, show_accuracy=False,
-                       class_weight=None, sample_weight=None):
+    def __fit_weighted(self, X, y, callbacks, show_metrics, batch_size=128, nb_epoch=100, verbose=1,
+                       extra_callbacks=(), validation_split=0., validation_data=None, shuffle=True,
+                       show_accuracy=False, class_weight=None, sample_weight=None):
 
         X = standardize_X(X)
         y = standardize_y(y)
@@ -632,15 +681,17 @@ class Sequential(Model, containers.Sequential):
         # out_labels = f.out_labels
         sample_weight = standardize_weights(y, class_weight=class_weight, sample_weight=sample_weight)
         ins = X + [y, sample_weight]
-        metrics = ['loss', 'acc', 'val_loss', 'val_acc']
-        return self._fit(f, ins, out_labels=f.out_labels, batch_size=batch_size, nb_epoch=nb_epoch,
-                         verbose=verbose, callbacks=callbacks,
-                         val_f=val_f, val_ins=val_ins,
-                         shuffle=shuffle, metrics=metrics)
 
-    def __fit_unweighted(self, X, y, batch_size=128, nb_epoch=100, verbose=1, callbacks=(),
-                         validation_split=0., validation_data=None, shuffle=True, show_accuracy=False):
+        return self._fit(f, ins, callbacks, val_f=val_f, val_ins=val_ins, metrics=show_metrics, batch_size=batch_size,
+                         nb_epoch=nb_epoch, extra_callbacks=extra_callbacks, shuffle=shuffle, verbose=verbose)
+
+    def __fit_unweighted(self, X, y, callbacks, show_metrics, batch_size=128, nb_epoch=100, verbose=1,
+                         extra_callbacks=(), validation_split=0., validation_data=None,
+                         shuffle=True, show_accuracy=False, class_weight=None, sample_weight=None):
         assert self.weights is None
+        if class_weight or sample_weight:
+            logger.warn('Model compiled without weights. Weights will be dropped.')
+
         X = standardize_X(X)
         y = standardize_y(y)
         val_f = None
@@ -673,15 +724,12 @@ class Sequential(Model, containers.Sequential):
             # out_labels = ['loss']
 
         ins = X + [y]
-        metrics = ['loss', 'acc', 'val_loss', 'val_acc']
-        # logger.debug('out labels: %s' % str(f.out_labels))
-        return self._fit(f, ins, out_labels=f.out_labels, batch_size=batch_size, nb_epoch=nb_epoch,
-                         verbose=verbose, callbacks=callbacks,
-                         val_f=val_f, val_ins=val_ins,
-                         shuffle=shuffle, metrics=metrics)
+        # logger.debug('Show metrics: %s ' % str(show_metrics))
+        return self._fit(f, ins, callbacks, val_f=val_f, val_ins=val_ins, metrics=show_metrics, batch_size=batch_size,
+                         nb_epoch=nb_epoch, extra_callbacks=extra_callbacks, shuffle=shuffle, verbose=verbose)
 
     # noinspection PyMethodMayBeStatic
-    def fit(self, X, y, batch_size=128, nb_epoch=100, verbose=1, callbacks=(),
+    def fit(self, X, y, callbacks, show_metrics, batch_size=128, nb_epoch=100, verbose=1, extra_callbacks=(),
             validation_split=0., validation_data=None, shuffle=True, show_accuracy=False,
             class_weight=None, sample_weight=None):
         """
@@ -791,6 +839,7 @@ class Sequential(Model, containers.Sequential):
         self.__init__(layers=layers)
 
 
+# TODO: This model is out of date, and must not work now. Adapt it to the changed Design/API of Model.
 class Graph(Model, containers.Graph):
     def __init__(self):
         super(Graph, self).__init__()
@@ -902,24 +951,22 @@ class Graph(Model, containers.Graph):
             val_ins = X_val + y_val + sample_weight_list_val
 
         f = self._train
-        out_labels = ['loss']
-        metrics = ['loss', 'val_loss']
+        # out_labels = ['loss']
+        # metrics = ['loss', 'val_loss']
 
         sample_weight_list = [standardize_weights(y[i], sample_weight=sample_weight_list[i],
                                                   class_weight=class_weight_list[i])
                               for i in range(len(self.output_order))]
         ins = X + y + sample_weight_list
 
-        history = self._fit(f, ins, out_labels=out_labels, batch_size=batch_size, nb_epoch=nb_epoch,
-                            verbose=verbose, callbacks=callbacks,
-                            val_f=val_f, val_ins=val_ins,
-                            shuffle=shuffle, metrics=metrics)
+        history = self._fit(f, ins, batch_size=batch_size, nb_epoch=nb_epoch, verbose=verbose,
+                            callbacks=callbacks, val_f=val_f, val_ins=val_ins, shuffle=shuffle)
         return history
 
     def evaluate(self, data, batch_size=128, verbose=0, sample_weight=None):
         sample_weight = {} if sample_weight is None else sample_weight
-        sample_weight = [standardize_weights(data[name],
-                                             sample_weight=sample_weight.get(name)) for name in self.output_order]
+        sample_weight = [standardize_weights(data[name], sample_weight=sample_weight.get(name))
+                         for name in self.output_order]
 
         ins = [data[name] for name in self.input_order] + \
               [standardize_y(data[name]) for name in self.output_order] + sample_weight
