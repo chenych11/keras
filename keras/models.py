@@ -67,6 +67,17 @@ def slice_X(X, start=None, stop=None):
             return X[start:stop]
 
 
+def objective_fnc(fn):
+    def symvar(y_true, y_pred, mask=None):
+        obj_output = fn(y_true, y_pred)
+        if mask is None:
+            return obj_output.mean(dtype=theano.config.floatX)
+        else:
+            obj_output = obj_output[mask.nonzero()]
+            return obj_output.mean(dtype=theano.config.floatX)
+    return symvar
+
+
 def weighted_objective(fn):
     def weighted(y_true, y_pred, weights, mask=None):
         # it's important that 0 * Inf == 0, not NaN, so we need to filter
@@ -156,17 +167,6 @@ def get_function_name(o):
         return o
     else:
         return o.__name__
-
-
-def objective_fnc(fn):
-    def symvar(y_true, y_pred, mask=None):
-        obj_output = fn(y_true, y_pred)
-        if mask is None:
-            return obj_output.mean(dtype=theano.config.floatX)
-        else:
-            obj_output = obj_output[mask.nonzero()]
-            return obj_output.mean(dtype=theano.config.floatX)
-    return symvar
 
 
 class Model(object):
@@ -419,7 +419,14 @@ class Sequential(Model, containers.Sequential):
         # target of model
         self.y = T.zeros_like(self.y_train)
 
-        self.weights = T.ones_like(self.y_train)
+        # Fixme: verify this code: I think this code should create a tensor with shape like the y_train
+        # except the last dimension, which is set to be one.
+        # self.weights = T.ones_like(self.y_train)
+        # self.weights = T.ones(self.y_train.shape[:-1] + (1,))
+        # weight = T.ones_like(self.y_train).take([0], axis=-1).astype(theano.config.floatX)
+        # self.weights = T.unbroadcast(weight, weight.ndim-1)
+        TmpTensorType = theano.tensor.TensorType(dtype=theano.config.floatX, broadcastable=(False, )*self.y_train.ndim)
+        self.weights = TmpTensorType()
 
         if hasattr(self.layers[-1], "get_output_mask"):
             mask = self.layers[-1].get_output_mask()
@@ -839,12 +846,56 @@ class Sequential(Model, containers.Sequential):
         self.__init__(layers=layers)
 
 
-# TODO: This model is out of date, and must not work now. Adapt it to the changed Design/API of Model.
+# TODO: Test
 class Graph(Model, containers.Graph):
-    def __init__(self):
+    def __init__(self, weighted_inputs=False):
         super(Graph, self).__init__()
+        self.is_weighted_input = weighted_inputs
 
     def compile(self, optimizer, loss, theano_mode=None):
+        """
+        :param optimizer: Optimizer to choose. See optimizers
+        :param loss: a map from output names to loss function names
+        :param theano_mode:  the mode to compile the computation graphs. See theano Mode
+        :return: None
+        """
+        if self.is_weighted_input:
+            self._compile_with_weights(optimizer, loss, theano_mode)
+        else:
+            self._compile_without_weights(optimizer, loss, theano_mode)
+
+    def _compile_fncs(self, train_ins, train_loss, updates, test_ins, test_loss, pred_ins, ys_test, theano_mode):
+        self._train = theano.function(train_ins, train_loss, updates=updates,
+                                      allow_input_downcast=True, mode=theano_mode)
+        self._test = theano.function(test_ins, test_loss,
+                                     allow_input_downcast=True, mode=theano_mode)
+        self._predict = theano.function(inputs=pred_ins, outputs=ys_test,
+                                        allow_input_downcast=True, mode=theano_mode)
+
+        self._train.out_labels = ('loss',)
+        self._test.out_labels = ('loss', )
+        self._predict.out_labels = ('pred',)
+
+        def __summary_outputs(outs, batch_sizes):
+            """
+                :param outs: outputs of the _test* function. It is a list, and each element a list of
+                values of the outputs of the _test* function on corresponding batch.
+                :type outs: list
+                :param batch_sizes: batch sizes. A list with the same length with outs. Each element
+                is a size of corresponding batch.
+                :type batch_sizes: list
+                Aggregate outputs of batches as if the test function evaluates
+                the metric values on the union of the batches.
+                Note this function must be redefined for each specific problem
+            """
+            out = np.array(outs, dtype=theano.config.floatX)
+            batch_size = np.array(batch_sizes, dtype=theano.config.floatX)
+            return np.sum(out * batch_size, axis=1)/batch_size.sum()
+
+        self._train.summarize_outputs = __summary_outputs
+        self._test.summarize_outputs = __summary_outputs
+
+    def _compile_with_weights(self, optimizer, loss, theano_mode=None):
         # loss is a dictionary mapping output name to loss functions
         ys = []
         ys_train = []
@@ -852,6 +903,8 @@ class Graph(Model, containers.Graph):
         weights = []
         train_loss = 0.
         test_loss = 0.
+        self.is_weighted_input = True
+
         for output_name in self.output_order:
             loss_fn = loss[output_name]
             output = self.outputs[output_name]
@@ -867,7 +920,16 @@ class Graph(Model, containers.Graph):
             else:
                 mask = None
 
-            weight = T.ones_like(y_test)
+            # Fixme: verify this code: I think this code should create a tensor with shape like the y_train
+            # except the last dimension, which is set to be one. Report a bug if verified.
+            # One way to solve this is as:
+            # weight = T.ones_like(y_test)
+            # weight = T.ones_like(y_test).take([0], axis=-1).astype(theano.config.floatX)
+            # weight = T.unbroadcast(weight, weight.ndim-1)
+            # Another way is simpler: instead of creating a instanced symbolic variable, I just declare a tensor
+            # type and then create a symbolic variable of this type.
+            TmpTensorType = theano.tensor.TensorType(dtype=theano.config.floatX, broadcastable=(False, )*y_test.ndim)
+            weight = TmpTensorType()
             weights.append(weight)
             weighted_loss = weighted_objective(objectives.get(loss_fn))
             train_loss += weighted_loss(y, y_train, weight, mask)
@@ -888,31 +950,98 @@ class Graph(Model, containers.Graph):
         self.theano_mode = theano_mode
         self.loss = loss
 
-        self._train = theano.function(train_ins, train_loss, updates=updates,
-                                      allow_input_downcast=True, mode=theano_mode)
-        self._test = theano.function(test_ins, test_loss,
-                                     allow_input_downcast=True, mode=theano_mode)
-        self._predict = theano.function(inputs=ins, outputs=ys_test,
-                                        allow_input_downcast=True, mode=theano_mode)
+        self._compile_fncs(train_ins, train_loss, updates, test_ins, test_loss, ins, ys_test, theano_mode)
+        # self._train = theano.function(train_ins, train_loss, updates=updates,
+        #                               allow_input_downcast=True, mode=theano_mode)
+        # self._test = theano.function(test_ins, test_loss,
+        #                              allow_input_downcast=True, mode=theano_mode)
+        # self._predict = theano.function(inputs=ins, outputs=ys_test,
+        #                                 allow_input_downcast=True, mode=theano_mode)
+
+    def _compile_without_weights(self, optimizer, loss, theano_mode=None):
+        # loss is a dictionary mapping output name to loss functions
+        ys = []
+        ys_train = []
+        ys_test = []
+        train_loss = 0.
+        test_loss = 0.
+        self.is_weighted_input = False
+
+        for output_name in self.output_order:
+            loss_fn = loss[output_name]
+            output = self.outputs[output_name]
+            y_train = output.get_output(True)
+            y_test = output.get_output(False)
+            y = T.zeros_like(y_test)
+            ys.append(y)
+            ys_train.append(y_train)
+            ys_test.append(y_test)
+
+            if hasattr(output, "get_output_mask"):
+                mask = output.get_output_mask()
+            else:
+                mask = None
+
+            unweighted_loss = objective_fnc(objectives.get(loss_fn))
+            train_loss += unweighted_loss(y, y_train, mask)
+            test_loss += unweighted_loss(y, y_test, mask)
+
+        train_loss.name = 'train_loss'
+        test_loss.name = 'test_loss'
+
+        ins = [self.inputs[name].input for name in self.input_order]
+        train_ins = ins + ys
+        test_ins = ins + ys
+
+        for r in self.regularizers:
+            train_loss = r(train_loss)
+        self.optimizer = optimizers.get(optimizer)
+        updates = self.optimizer.get_updates(self.params, self.constraints, train_loss)
+        updates += self.updates
+        self.theano_mode = theano_mode
+        self.loss = loss
+
+        # self._train = theano.function(train_ins, train_loss, updates=updates,
+        #                               allow_input_downcast=True, mode=theano_mode)
+        # self._test = theano.function(test_ins, test_loss,
+        #                              allow_input_downcast=True, mode=theano_mode)
+        # self._predict = theano.function(inputs=ins, outputs=ys_test,
+        #                                 allow_input_downcast=True, mode=theano_mode)
+        self._compile_fncs(train_ins, train_loss, updates, test_ins, test_loss, ins, ys_test, theano_mode)
+
+    def _prepare_input(self, data, class_weight=None, sample_weight=None):
+        if not self.is_weighted_input and (class_weight is not None or sample_weight is not None):
+            logger.warn('Compiled without weighted samples (classes) supported. Weights will ignored')
+        X = [data[name] for name in self.input_order]
+        y = [standardize_y(data[name]) for name in self.output_order]
+        if self.is_weighted_input is not None:
+            sample_weight = [standardize_weights(data[name], sample_weight=sample_weight.get(name),
+                                                 class_weight=class_weight.get(name))
+                             for name in self.output_order]
+            return X + y + sample_weight
+        else:
+            return X + y
 
     def train_on_batch(self, data, class_weight=None, sample_weight=None):
-        class_weight = {} if class_weight is None else class_weight
-        sample_weight = {} if sample_weight is None else sample_weight
-        # data is a dictionary mapping output and input names to arrays
-        sample_weight = [standardize_weights(data[name],
-                                             sample_weight=sample_weight.get(name),
-                                             class_weight=class_weight.get(name)) for name in self.output_order]
-        ins = [data[name] for name in self.input_order] + \
-              [standardize_y(data[name]) for name in self.output_order] + sample_weight
+        # class_weight = {} if class_weight is None else class_weight
+        # sample_weight = {} if sample_weight is None else sample_weight
+        # # data is a dictionary mapping output and input names to arrays
+        # sample_weight = [standardize_weights(data[name], sample_weight=sample_weight.get(name),
+        #                                      class_weight=class_weight.get(name))
+        #                  for name in self.output_order]
+        # ins = [data[name] for name in self.input_order] + \
+        #       [standardize_y(data[name]) for name in self.output_order] + sample_weight
+        ins = self._prepare_input(data, class_weight, sample_weight)
         return self._train(*ins)
 
     def test_on_batch(self, data, sample_weight=None):
-        sample_weight = {} if sample_weight is None else sample_weight
-        # data is a dictionary mapping input names to arrays
-        sample_weight = [standardize_weights(data[name],
-                                             sample_weight=sample_weight.get(name)) for name in self.output_order]
-        ins = [data[name] for name in self.input_order] + \
-              [standardize_y(data[name]) for name in self.output_order] + sample_weight
+        # sample_weight = {} if sample_weight is None else sample_weight
+        # # data is a dictionary mapping input names to arrays
+        # sample_weight = [standardize_weights(data[name], sample_weight=sample_weight.get(name))
+        #                  for name in self.output_order]
+        # ins = [data[name] for name in self.input_order] + \
+        #       [standardize_y(data[name]) for name in self.output_order] + sample_weight
+        ins = self._prepare_input(data, None, sample_weight)
         return self._test(*ins)
 
     def predict_on_batch(self, data):
@@ -920,16 +1049,50 @@ class Graph(Model, containers.Graph):
         ins = [data[name] for name in self.input_order]
         return self._predict(*ins)
 
-    def fit(self, data, batch_size=128, nb_epoch=100, verbose=1, callbacks=(),
-            validation_split=0., validation_data=None, shuffle=True, class_weight=None, sample_weight=None):
-        callbacks = list(callbacks)
+    def _fit_unweighted(self, data, callbacks, show_metrics, batch_size=128, nb_epoch=100, verbose=1,
+                        extra_callbacks=(), validation_split=0., validation_data=None, shuffle=True,
+                        class_weight=None, sample_weight=None):
+        # if not self.is_weighted_input and (class_weight is not None or sample_weight is not None):
+        #     logger.warn('Compiled without weighted samples (classes) supported. Weights are ignored.')
+
+        # X = [data[name] for name in self.input_order]
+        # y = [standardize_y(data[name]) for name in self.output_order]
+        ins = self._prepare_input(data, class_weight, sample_weight)
+
+        val_f = None
+        val_ins = None
+        if validation_data or validation_split:
+            val_f = self._test
+        if validation_data:
+            # val_ins = [validation_data[name] for name in self.input_order] + \
+            #           [standardize_y(validation_data[name]) for name in self.output_order]
+            val_ins = self._prepare_input(validation_data, sample_weight=sample_weight)
+
+        elif 0 < validation_split < 1:
+            split_at = max(int(len(ins[0]) * (1 - validation_split)), 1)
+            # X, X_val = (slice_X(X, 0, split_at), slice_X(X, split_at))
+            # y, y_val = (slice_X(y, 0, split_at), slice_X(y, split_at))
+            # val_ins = X_val + y_val
+            ins, val_ins = (self._prepare_input(ins, 0, split_at), self._prepare_input(ins, split_at))
+
+        f = self._train
+        # out_labels = ['loss']
+        # metrics = ['loss', 'val_loss']
+
+        return self._fit(f, ins, callbacks, val_f=val_f, val_ins=val_ins, metrics=show_metrics,
+                         batch_size=batch_size, nb_epoch=nb_epoch, extra_callbacks=extra_callbacks,
+                         shuffle=shuffle, verbose=verbose)
+
+    def _fit_weighted(self, data, callbacks, show_metrics, batch_size=128, nb_epoch=100, verbose=1,
+                      extra_callbacks=(), validation_split=0., validation_data=None, shuffle=True,
+                      class_weight=None, sample_weight=None):
         class_weight = {} if class_weight is None else class_weight
         sample_weight = {} if sample_weight is None else sample_weight
 
         X = [data[name] for name in self.input_order]
         y = [standardize_y(data[name]) for name in self.output_order]
-        sample_weight_list = [standardize_weights(data[name],
-                                                  sample_weight=sample_weight.get(name)) for name in self.output_order]
+        sample_weight_list = [standardize_weights(data[name], sample_weight=sample_weight.get(name))
+                              for name in self.output_order]
         class_weight_list = [class_weight.get(name) for name in self.output_order]
 
         val_f = None
@@ -943,7 +1106,7 @@ class Graph(Model, containers.Graph):
                       [standardize_y(validation_data[name]) for name in self.output_order] + sample_weight
 
         elif 0 < validation_split < 1:
-            split_at = int(len(X[0]) * (1 - validation_split))
+            split_at = max(int(len(X[0]) * (1 - validation_split)), 1)
             X, X_val = (slice_X(X, 0, split_at), slice_X(X, split_at))
             y, y_val = (slice_X(y, 0, split_at), slice_X(y, split_at))
             sample_weight_list, sample_weight_list_val = (slice_X(sample_weight_list, 0, split_at),
@@ -959,19 +1122,31 @@ class Graph(Model, containers.Graph):
                               for i in range(len(self.output_order))]
         ins = X + y + sample_weight_list
 
-        history = self._fit(f, ins, batch_size=batch_size, nb_epoch=nb_epoch, verbose=verbose,
-                            callbacks=callbacks, val_f=val_f, val_ins=val_ins, shuffle=shuffle)
+        history = self._fit(f, ins, callbacks, val_f=val_f, val_ins=val_ins, metrics=show_metrics, batch_size=batch_size,
+                            nb_epoch=nb_epoch, extra_callbacks=extra_callbacks,  shuffle=shuffle, verbose=verbose)
         return history
 
-    def evaluate(self, data, batch_size=128, verbose=0, sample_weight=None):
-        sample_weight = {} if sample_weight is None else sample_weight
-        sample_weight = [standardize_weights(data[name], sample_weight=sample_weight.get(name))
-                         for name in self.output_order]
+    def fit(self, data, callbacks, show_metrics, batch_size=128, nb_epoch=100, verbose=1,
+            extra_callbacks=(), validation_split=0., validation_data=None, shuffle=True,
+            class_weight=None, sample_weight=None):
+        kwargs = locals()
+        kwargs.pop('self')
+        if self.is_weighted_input:
+            self._fit_weighted(**kwargs)
+        else:
+            self._fit_unweighted(**kwargs)
 
-        ins = [data[name] for name in self.input_order] + \
-              [standardize_y(data[name]) for name in self.output_order] + sample_weight
+    def evaluate(self, data, batch_size=128, verbose=0, sample_weight=None):
+        # sample_weight = {} if sample_weight is None else sample_weight
+        # sample_weight = [standardize_weights(data[name], sample_weight=sample_weight.get(name))
+        #                  for name in self.output_order]
+        #
+        # ins = [data[name] for name in self.input_order] + \
+        #       [standardize_y(data[name]) for name in self.output_order] + sample_weight
+        ins = self._prepare_input(data, sample_weight=sample_weight)
         outs = self._test_loop(self._test, ins, batch_size, verbose)
-        return outs[0]
+        # return outs[0]
+        return outs
 
     def predict(self, data, batch_size=128, verbose=0):
         ins = [data[name] for name in self.input_order]
