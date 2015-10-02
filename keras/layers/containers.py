@@ -88,6 +88,7 @@ class Sequential(Layer):
     def count_params(self):
         return sum([layer.count_params() for layer in self.layers])
 
+
 class Graph(Layer):
     """
         Implement a NN graph with arbitrary layer connections,
@@ -105,15 +106,16 @@ class Graph(Layer):
             - set_weights
     """
     def __init__(self):
-        self.namespace = set()  # strings
-        self.nodes = {}  # layer-like
-        self.inputs = {}  # layer-like
-        self.input_order = []  # strings
-        self.outputs = {}  # layer-like
-        self.output_order = []  # strings
-        self.input_config = []  # dicts
-        self.output_config = []  # dicts
-        self.node_config = []  # dicts
+        super(Graph, self).__init__()
+        self.namespace = set()    # strings
+        self.nodes = {}           # layer-like
+        self.inputs = {}          # layer-like
+        self.input_order = []     # strings
+        self.outputs = {}         # layer-like
+        self.output_order = []    # strings
+        self.input_config = []    # dicts
+        self.output_config = []   # dicts
+        self.node_config = []     # dicts
 
         self.params = []
         self.regularizers = []
@@ -175,35 +177,46 @@ class Graph(Layer):
         self.inputs[name] = layer
         self.input_config.append({'name': name, 'ndim': ndim, 'dtype': dtype})
 
-    def add_node(self, layer, name, input=None, inputs=None,
+    def add_node(self, layer, name, inputs=None,
                  merge_mode='concat', concat_axis=-1, create_output=False):
         if hasattr(layer, 'set_name'):
             layer.set_name(name)
         if name in self.namespace:
             raise Exception('Duplicate node identifier: ' + name)
-        if input:
-            if input not in self.namespace:
-                raise Exception('Unknown node/input identifier: ' + input)
-            if input in self.nodes:
-                layer.set_previous(self.nodes[input])
-            elif input in self.inputs:
-                layer.set_previous(self.inputs[input])
-        if inputs:
-            to_merge = []
-            for n in inputs:
-                if n in self.nodes:
-                    to_merge.append(self.nodes[n])
-                elif n in self.inputs:
-                    to_merge.append(self.inputs[n])
+
+        if isinstance(inputs, str):
+            inputs = [inputs]
+
+        if isinstance(inputs, (list, tuple)):
+            if len(inputs) == 1:
+                inputs_ = inputs[0]
+                if inputs_ not in self.namespace:
+                    raise ValueError('Unknown node/input identifier: ' + inputs_)
+                if inputs_ in self.nodes:
+                    layer.set_previous(self.nodes[inputs_])
+                elif inputs_ in self.inputs:
+                    layer.set_previous(self.inputs[inputs_])
                 else:
-                    raise Exception('Unknown identifier: ' + n)
-            merge = Merge(to_merge, mode=merge_mode, concat_axis=concat_axis)
-            layer.set_previous(merge)
+                    # should never go here.
+                    raise ValueError('%s is in namespace, but not in node set or input set.'
+                                     'This indicates the program has a bug.' % inputs_)
+            else:
+                to_merge = []
+                for n in inputs:
+                    if n in self.nodes:
+                        to_merge.append(self.nodes[n])
+                    elif n in self.inputs:
+                        to_merge.append(self.inputs[n])
+                    else:
+                        raise ValueError('Unknown identifier: ' + n)
+                merge = Merge(to_merge, mode=merge_mode, concat_axis=concat_axis)
+                layer.set_previous(merge)
+        else:
+            raise TypeError('Only accept str, list or tuple as inputs')
 
         self.namespace.add(name)
         self.nodes[name] = layer
         self.node_config.append({'name': name,
-                                 'input': input,
                                  'inputs': inputs,
                                  'merge_mode': merge_mode,
                                  'concat_axis': concat_axis,
@@ -216,31 +229,39 @@ class Graph(Layer):
         self.updates += updates
 
         if create_output:
-            self.add_output(name, input=name)
+            self.add_output(name, inputs=name)
 
-    def add_output(self, name, input=None, inputs=None,
+    def add_output(self, name, inputs=None,
                    merge_mode='concat', concat_axis=-1):
         if name in self.output_order:
             raise Exception('Duplicate output identifier: ' + name)
-        if input:
-            if input not in self.namespace:
-                raise Exception('Unknown node/input identifier: ' + input)
-            if input in self.nodes:
-                self.outputs[name] = self.nodes[input]
-            elif input in self.inputs:
-                self.outputs[name] = self.inputs[input]
-        if inputs:
-            to_merge = []
-            for n in inputs:
-                if n not in self.nodes:
-                    raise Exception('Unknown identifier: ' + n)
-                to_merge.append(self.nodes[n])
-            merge = Merge(to_merge, mode=merge_mode, concat_axis=concat_axis)
-            self.outputs[name] = merge
+
+        if isinstance(inputs, str):
+            inputs = [inputs]
+
+        if isinstance(inputs, (list, tuple)):
+            if len(inputs) == 1:
+                input_ = inputs[0]
+                if input_ not in self.namespace:
+                    raise ValueError('Unknown node/input identifier: ' + input_)
+                if input_ in self.nodes:
+                    self.outputs[name] = self.nodes[input_]
+                elif input_ in self.inputs:
+                    self.outputs[name] = self.inputs[inputs]
+                else:
+                    raise ValueError('%s is in namespace, but not in node set or input set.'
+                                     'This indicates the program has a bug.' % input_)
+            else:
+                to_merge = []
+                for n in inputs:
+                    if n not in self.nodes:
+                        raise ValueError('Unknown identifier: ' + n)
+                    to_merge.append(self.nodes[n])
+                merge = Merge(to_merge, mode=merge_mode, concat_axis=concat_axis)
+                self.outputs[name] = merge
 
         self.output_order.append(name)
         self.output_config.append({'name': name,
-                                   'input': input,
                                    'inputs': inputs,
                                    'merge_mode': merge_mode,
                                    'concat_axis': concat_axis})
