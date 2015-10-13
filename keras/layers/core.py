@@ -114,6 +114,7 @@ class Layer(object):
     def count_params(self):
         return sum([np.prod(p.shape.eval()) for p in self.params])
 
+
 class MaskedLayer(Layer):
     """
     If your layer trivially supports masking (by simply copying the input mask to the output), then subclass MaskedLayer
@@ -408,7 +409,8 @@ class Dense(Layer):
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
                  W_constraint=None, b_constraint=None):
 
-        super(Dense, self).__init__()
+        #super(Dense, self).__init__()
+        Layer.__init__(self)
         self.init = initializations.get(init)
         self.activation = activations.get(activation)
         self.input_dim = input_dim
@@ -416,7 +418,7 @@ class Dense(Layer):
 
         self.input = T.matrix()
         self.W = self.init((self.input_dim, self.output_dim))
-        self.b = shared_zeros((self.output_dim))
+        self.b = shared_zeros(self.output_dim)
 
         self.params = [self.W, self.b]
 
@@ -688,3 +690,120 @@ class MaxoutDense(Layer):
                 "activity_regularizer": self.activity_regularizer.get_config() if self.activity_regularizer else None,
                 "W_constraint": self.W_constraint.get_config() if self.W_constraint else None,
                 "b_constraint": self.b_constraint.get_config() if self.b_constraint else None}
+
+
+class LayerList(object):
+    def __init__(self):
+        super(LayerList, self).__init__()
+        # self.__input_slots = []
+        self.input_layer_names = []
+        # self.output_slots = None
+        self.output_layers = []
+        self.input_layers = []
+
+    @property
+    def nb_input(self):
+        return len(self.input_layer_names)
+
+    @property
+    def nb_output(self):
+        return len(self.output_layers)
+
+    # def _set_nb_inputs(self, nb):
+    #     self.__input_slots = [None for _ in range(nb)]
+
+    def set_input_slot_names(self, names):
+        self.input_layer_names = []
+        for n in names:
+            self.input_layer_names.append(n)
+
+    # def _add_input(self, layer):
+    #     self.__input_slots.append({False: layer.get_output(train=False), True: layer.get_output(train=True)})
+    #     self.input_layers.append(layer)
+    #
+    # def add_inputs(self, inputs):
+    #     if isinstance(inputs, dict):
+    #         layers = [inputs[n] for n in self.input_layer_names]
+    #     elif isinstance(inputs, (list, tuple)):
+    #         layers = inputs
+    #     else:
+    #         raise TypeError('inputs must be a list (tuple) of layers or a dict that maps input name to input layer')
+    #     for layer_ in layers:
+    #         self._add_input(layer_)
+    def set_previous(self, layer):
+        self.set_inputs(layer)
+
+    def set_inputs(self, inputs):
+        if not hasattr(inputs, '__len__'):
+            inputs = [inputs]
+        assert len(inputs) == self.nb_input, 'Not enough inputs supplied.'
+        # self.__input_slots = [None for _ in range(self.nb_input)]
+        if isinstance(inputs, dict):
+            layers = [inputs[n] for n in self.input_layer_names]
+        elif isinstance(inputs, (list, tuple)):
+            layers = inputs
+        else:
+            raise TypeError('inputs must be a list (tuple) of layers or a dict that maps input name to input layer')
+
+        self.input_layers = layers
+
+    # def set_output(self, idx):
+    #     raise NotImplementedError('Not implemented for this abstract class')
+
+    def get_input(self, train):
+        return [layer.get_output(train) for layer in self.input_layers]
+
+    def set_name(self, names):
+        for name_, layer_ in zip(names, self.output_layers):
+            layer_.set_name(name_)
+
+    # def get_output_names(self):
+    #     return [layer.get_name() for layer in self.output_layers]
+    def get_config(self):
+        return {"name": self.__class__.__name__,
+                "input_layers": [layer_.__class__.__name__ for layer_ in self.input_layers],
+                "output_layers": [layer_.__class__.__name__ for layer_ in self.output_layers]}
+
+
+class MultiInputLayer(Layer):
+    def __init__(self, slot_names):
+        super(MultiInputLayer, self).__init__()
+        self.input_layers = []
+        self.input_layer_names = slot_names
+
+    @property
+    def nb_input(self):
+        return len(self.input_layer_names)
+
+    # def get_input(self, train=False):
+    #     if self.nb_input == 1:
+    #         return self.input_layers[0].get_output(train)
+    #     else:
+    #         return [layer_ for layer_ in self.input_layers]
+
+    def set_previous(self, layers, connection_map=None):
+        """
+        :param layers: layers
+        :param connection_map: slot name to layer name map.
+        When this arg is given, the layers arg must be given as a dict that maps the name of the layer to the layer.
+        :return: None
+        """
+        assert len(layers) == self.nb_input, 'Supplied layers is not equal to the number of ' \
+                                             'the input of this kink of layer'
+        if isinstance(connection_map, dict):
+            layers = [layers[connection_map[sn]] for sn in self.input_layer_names]
+
+        self.input_layers = [None for _ in range(self.nb_input)]
+        for idx, layer_ in enumerate(layers):
+            self.input_layers[idx] = layer_
+
+    def get_output(self, train=False):
+        raise NotImplementedError('Abstract method is not implemented yet')
+
+    def get_input(self, train=False):
+        return dict((name, layer.get_output(train)) for name, layer in zip(self.input_layer_names, self.input_layers))
+
+    def get_config(self):
+        return {"name": self.__class__.__name__,
+                "input_layers": [layer.__class__.__name__ for layer in self.input_layers]}
+

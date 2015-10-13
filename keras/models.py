@@ -38,7 +38,7 @@ def batch_shuffle(index_array, batch_size):
     index_array = index_array[:batch_count*batch_size]
     index_array = index_array.reshape((batch_count, batch_size))
     np.random.shuffle(index_array)
-    index_array = index_array.flatten()
+    index_array = index_array.ravel()
     return np.append(index_array, last_batch)
 
 
@@ -849,7 +849,10 @@ class Sequential(Model, containers.Sequential):
 # TODO: Test
 class Graph(Model, containers.Graph):
     def __init__(self, weighted_inputs=False):
-        super(Graph, self).__init__()
+        # super(Graph, self).__init__()
+        # todo: check why the code above does not work.
+        Model.__init__(self)
+        containers.Graph.__init__(self)
         self.is_weighted_input = weighted_inputs
 
     def compile(self, optimizer, loss, theano_mode=None):
@@ -876,7 +879,7 @@ class Graph(Model, containers.Graph):
         self._test.out_labels = ('loss', )
         self._predict.out_labels = ('pred',)
 
-        def __summary_outputs(outs, batch_sizes):
+        def __summarize_outputs(outs, batch_sizes):
             """
                 :param outs: outputs of the _test* function. It is a list, and each element a list of
                 values of the outputs of the _test* function on corresponding batch.
@@ -892,8 +895,8 @@ class Graph(Model, containers.Graph):
             batch_size = np.array(batch_sizes, dtype=theano.config.floatX)
             return np.sum(out * batch_size, axis=1)/batch_size.sum()
 
-        self._train.summarize_outputs = __summary_outputs
-        self._test.summarize_outputs = __summary_outputs
+        self._train.summarize_outputs = __summarize_outputs
+        self._test.summarize_outputs = __summarize_outputs
 
     def _compile_with_weights(self, optimizer, loss, theano_mode=None):
         # loss is a dictionary mapping output name to loss functions

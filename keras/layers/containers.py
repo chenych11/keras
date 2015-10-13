@@ -2,10 +2,16 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
-import theano.tensor as T
-from ..layers.core import Layer, Merge
+# import theano.tensor as T
+from theano.tensor import TensorType
+from ..layers.core import Layer, LayerList
 from ..utils.theano_utils import ndim_tensor
+# noinspection PyUnresolvedReferences
 from six.moves import range
+
+import logging
+
+logger = logging.getLogger('keras.layers.containers')
 
 
 class Sequential(Layer):
@@ -25,9 +31,19 @@ class Sequential(Layer):
         self.regularizers = []
         self.constraints = []
         self.updates = []
+        self.__input_slots = [None]
+        self.__output_slots = [None]
 
         for layer in layers:
             self.add(layer)
+
+    @property
+    def nb_input(self):
+        return 1
+
+    @property
+    def nb_output(self):
+        return 1
 
     # noinspection PyMethodOverriding
     def set_previous(self, layer):
@@ -59,6 +75,17 @@ class Sequential(Layer):
                 ndim = l.input.ndim
                 self.layers[0].input = ndim_tensor(ndim)
                 break
+
+    def set_input_slots(self, inputs):
+        """
+        :param inputs: a map from bool to theano.tensor variable.
+        :type inputs: dict
+        :return: None
+        """
+        self.__input_slots[0] = inputs
+
+    def set_output_slots(self):
+        self.__output_slots[0] = {False: self.get_output(train=False), True: self.get_output(train=True)}
 
     def get_input(self, train=False):
         if not hasattr(self.layers[0], 'input'):
@@ -122,6 +149,9 @@ class Graph(Layer):
         self.constraints = []
         self.updates = []
 
+        self.__input_slots = None
+        self.__output_slots = None
+
     @property
     def nb_input(self):
         return len(self.inputs)
@@ -169,16 +199,45 @@ class Graph(Layer):
         if dtype == 'float':
             layer.input = ndim_tensor(ndim)
         else:
-            if ndim == 2:
-                layer.input = T.imatrix()
-            else:
-                raise Exception('Type "int" can only be used with ndim==2 (Embedding).')
+            # if ndim == 2:
+            #     layer.input = T.imatrix()
+            # else:
+            #     raise Exception('Type "int" can only be used with ndim==2 (Embedding).')
+            tensor_var = TensorType(dtype, (False,)*ndim)
+            layer.input = tensor_var()
+
         layer.input.name = name
         self.inputs[name] = layer
         self.input_config.append({'name': name, 'ndim': ndim, 'dtype': dtype})
 
-    def add_node(self, layer, name, inputs=None,
-                 merge_mode='concat', concat_axis=-1, create_output=False):
+    def add_layerlist(self, layerlist, names, inputs):
+        if len(names) != layerlist.nb_output:
+            logger.warn('Not enough names for each output layer of this layerlist. '
+                        'The %dth-%dth layers are dropped.' % (len(names)+1, len(layerlist.output_layers)+1))
+        inputs = self.get_nodes(inputs)
+        layerlist.set_inputs(inputs)
+        for name_, layer_ in zip(names, layerlist.output_layers):
+            if name_:
+                self.add_node(layer_, name_)
+
+    def get_nodes(self, names):
+        if isinstance(names, str):
+            names = [names]
+        nodes = []
+        for n in names:
+            if n in self.nodes:
+                nodes.append(self.nodes[n])
+            elif n in self.inputs:
+                nodes.append(self.inputs[n])
+            else:
+                raise ValueError('Unknown node/input identifier: ' + n)
+        return nodes
+
+    def add_node(self, layer, name, inputs=None):
+        if isinstance(layer, LayerList):
+            self.add_layerlist(layer, name, inputs)
+            return
+
         if hasattr(layer, 'set_name'):
             layer.set_name(name)
         if name in self.namespace:
@@ -186,6 +245,9 @@ class Graph(Layer):
 
         if isinstance(inputs, str):
             inputs = [inputs]
+
+        if inputs is None:
+            inputs = ()
 
         if isinstance(inputs, (list, tuple)):
             if len(inputs) == 1:
@@ -200,27 +262,23 @@ class Graph(Layer):
                     # should never go here.
                     raise ValueError('%s is in namespace, but not in node set or input set.'
                                      'This indicates the program has a bug.' % inputs_)
+            elif len(inputs) == 0:
+                pass
             else:
-                to_merge = []
-                for n in inputs:
-                    if n in self.nodes:
-                        to_merge.append(self.nodes[n])
-                    elif n in self.inputs:
-                        to_merge.append(self.inputs[n])
-                    else:
-                        raise ValueError('Unknown identifier: ' + n)
-                merge = Merge(to_merge, mode=merge_mode, concat_axis=concat_axis)
-                layer.set_previous(merge)
+                ilyers = []
+                for ilyer_name in inputs:
+                    if ilyer_name in self.nodes:
+                        ilyers.append(self.nodes[ilyer_name])
+                    elif ilyer_name in self.inputs:
+                        ilyers.append(self.inputs[ilyer_name])
+                layer.set_previous(ilyers)
         else:
             raise TypeError('Only accept str, list or tuple as inputs')
 
         self.namespace.add(name)
         self.nodes[name] = layer
-        self.node_config.append({'name': name,
-                                 'inputs': inputs,
-                                 'merge_mode': merge_mode,
-                                 'concat_axis': concat_axis,
-                                 'create_output': create_output})
+        self.node_config.append({'name': name, 'inputs': inputs})
+
         layer.init_updates()
         params, regularizers, constraints, updates = layer.get_params()
         self.params += params
@@ -228,43 +286,26 @@ class Graph(Layer):
         self.constraints += constraints
         self.updates += updates
 
-        if create_output:
-            self.add_output(name, inputs=name)
-
-    def add_output(self, name, inputs=None,
-                   merge_mode='concat', concat_axis=-1):
+    def add_output(self, name, node=None):
+        """ Mark a node or input node as output node.
+        :param name: output name.
+        :param node: the name of the node to be marked
+        :return: None
+        """
         if name in self.output_order:
             raise Exception('Duplicate output identifier: ' + name)
 
-        if isinstance(inputs, str):
-            inputs = [inputs]
-
-        if isinstance(inputs, (list, tuple)):
-            if len(inputs) == 1:
-                input_ = inputs[0]
-                if input_ not in self.namespace:
-                    raise ValueError('Unknown node/input identifier: ' + input_)
-                if input_ in self.nodes:
-                    self.outputs[name] = self.nodes[input_]
-                elif input_ in self.inputs:
-                    self.outputs[name] = self.inputs[inputs]
-                else:
-                    raise ValueError('%s is in namespace, but not in node set or input set.'
-                                     'This indicates the program has a bug.' % input_)
-            else:
-                to_merge = []
-                for n in inputs:
-                    if n not in self.nodes:
-                        raise ValueError('Unknown identifier: ' + n)
-                    to_merge.append(self.nodes[n])
-                merge = Merge(to_merge, mode=merge_mode, concat_axis=concat_axis)
-                self.outputs[name] = merge
-
+        if node not in self.namespace:
+            raise ValueError('Unknown node/input identifier: ' + node)
+        if node in self.nodes:
+            self.outputs[name] = self.nodes[node]
+        elif node in self.inputs:
+            self.outputs[name] = self.inputs[node]
+        else:
+            raise ValueError('%s is in namespace, but not in node set or input set.'
+                             'This indicates the program has a bug.' % node)
         self.output_order.append(name)
-        self.output_config.append({'name': name,
-                                   'inputs': inputs,
-                                   'merge_mode': merge_mode,
-                                   'concat_axis': concat_axis})
+        self.output_config.append({'name': name, 'inputs': node})
 
     def get_config(self):
         return {"name": self.__class__.__name__,

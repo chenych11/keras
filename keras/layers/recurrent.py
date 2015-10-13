@@ -507,7 +507,7 @@ class LSTMLayer(Recurrent):
         self.b = theano.shared(np.zeros(shape=(4, self.output_dim), dtype=theano.config.floatX),
                                name='bias', borrow=True)
 
-        self.params = [self.W, self.R]
+        self.params = [self.W, self.R, self.b]
         if train_init_cell:
             self.params.append(self.c_m1)
         if train_init_h:
