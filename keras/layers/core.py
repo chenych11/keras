@@ -27,6 +27,10 @@ class Layer(object):
         if not self.supports_masked_input() and layer.get_output_mask() is not None:
             raise Exception("Cannot connect non-masking layer to layer with masked output")
         self.previous = layer
+        self.on_connection_end()
+
+    def on_connection_end(self):
+        pass
 
     @property
     def nb_input(self):
@@ -156,6 +160,11 @@ class Masking(MaskedLayer):
         return T.any(T.ones_like(X) * (1. - T.eq(X, self.mask_value)), axis=-1)
 
     def get_output(self, train=False):
+        """
+        :param train:
+        :type train: bool
+        :return:
+        """
         X = self.get_input(train)
         return X * T.shape_padright(T.any((1. - T.eq(X, self.mask_value)), axis=-1))
 
@@ -165,12 +174,12 @@ class Masking(MaskedLayer):
 
 class TimeDistributedMerge(Layer):
     def __init__(self, mode='sum'):
-        '''
+        """
         Sum/multiply/avearge over a time distributed layer's outputs.
         mode: {'sum', 'mul', 'ave'}
         Tensor input dimensions:   (nb_sample, shared_dimension, input_dim)
         Tensor output dimensions:  (nb_sample, output_dim)
-        '''
+        """
         self.mode = mode
         self.params = []
         self.regularizers = []
@@ -770,6 +779,8 @@ class MultiInputLayer(Layer):
         super(MultiInputLayer, self).__init__()
         self.input_layers = []
         self.input_layer_names = slot_names
+        self.previous = None
+        self.name2layer = None
 
     @property
     def nb_input(self):
@@ -796,6 +807,8 @@ class MultiInputLayer(Layer):
         self.input_layers = [None for _ in range(self.nb_input)]
         for idx, layer_ in enumerate(layers):
             self.input_layers[idx] = layer_
+
+        self.name2layer = dict(zip(self.input_layer_names, self.input_layers))
 
     def get_output(self, train=False):
         raise NotImplementedError('Abstract method is not implemented yet')

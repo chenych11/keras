@@ -17,8 +17,8 @@ from . import callbacks as cbks
 from .utils.layer_utils import container_from_config
 from .utils.generic_utils import Progbar
 from .layers import containers
-
-
+from threading import Thread
+from Queue import Queue
 logger = logging.getLogger('keras.models')
 
 
@@ -189,6 +189,99 @@ class Model(object):
         self._predict = None
         self._test = None
         self._test_with_acc = None
+        self.jobs_pools = Queue(maxsize=10)
+
+    # def _fit(self, f, ins, callbacks, val_f=None, val_ins=None, metrics=(),
+    #          batch_size=128, nb_epoch=100, extra_callbacks=(), shuffle=True, verbose=1):
+    #     """
+    #         Abstract fit function for f(*ins). Assume that f returns a list, labelled by out_labels.
+    #     """
+    #     if f.n_returned_outputs == 0:
+    #         raise ValueError('We can not evaluate the outputs with none outputs')
+    #
+    #     standardize_outputs = lambda outputs: [outputs] \
+    #         if f.n_returned_outputs == 1 and not isinstance(outputs, (list, tuple)) else outputs
+    #     extra_callbacks = list(extra_callbacks)
+    #     nb_train_sample = ins[0].shape[0]
+    #
+    #     # logger.debug('out_labels: %s' % str(f.out_labels))
+    #
+    #     do_validation = False
+    #     if val_f and val_ins:
+    #         do_validation = True
+    #         pre_train_info = "Train on %d samples, validate on %d samples" % (len(ins[0]), len(val_ins[0]))
+    #     else:
+    #         pre_train_info = "Train on %d samples." % len(ins[0])
+    #
+    #     if verbose:
+    #         logger.info(pre_train_info)
+    #
+    #     index_array = np.arange(nb_train_sample)
+    #     #  TODO: any good idea to have history as mandatory callback?
+    #     # There is problems for setting history as mandatory callback, for not all metrics are calculated
+    #     # as the way in the History class. So I deleted this function for now and ask the user to define
+    #     # what the callback is.
+    #     # history = cbks.History()
+    #     # callbacks = [history, cbks.BaseLogger()] + callbacks if verbose else [history] + callbacks
+    #     callbacks_ = callbacks
+    #     callbacks = cbks.CallbackList([callbacks_] + extra_callbacks)
+    #
+    #     metrics_ = ['val_'+x for x in metrics] + list(metrics)
+    #     cndt_metrics = [m for m in self.all_metrics if m in metrics_]
+    #
+    #     callbacks.set_model(self)
+    #     callbacks.set_params({
+    #         'batch_size': batch_size,
+    #         'nb_epoch': nb_epoch,
+    #         'nb_sample': nb_train_sample,
+    #         'verbose': verbose,
+    #         'do_validation': do_validation,
+    #         'metrics': list(cndt_metrics),
+    #     })
+    #     callbacks.on_train_begin()
+    #
+    #     self.stop_training = False
+    #     for epoch in range(nb_epoch):
+    #         callbacks.on_epoch_begin(epoch)
+    #         if shuffle == 'batch':
+    #             index_array = batch_shuffle(index_array, batch_size)
+    #         elif shuffle:
+    #             np.random.shuffle(index_array)
+    #
+    #         epoch_logs = {}
+    #         batches = make_batches(nb_train_sample, batch_size)
+    #         for batch_index, (batch_start, batch_end) in enumerate(batches):
+    #             batch_ids = index_array[batch_start:batch_end]
+    #             try:
+    #                 ins_batch = slice_X(ins, batch_ids)
+    #             except TypeError:
+    #                 print('TypeError while preparing batch. \
+    #                     If using HDF5 input data, pass shuffle="batch".\n')
+    #                 raise
+    #
+    #             batch_logs = {'batch': batch_index, 'size': len(batch_ids)}
+    #             callbacks.on_batch_begin(batch_index, batch_logs)
+    #             outs = standardize_outputs(f(*ins_batch))
+    #             _logs = [(label, value) for label, value in zip(f.out_labels, outs)]
+    #             batch_logs.update(_logs)
+    #             callbacks.on_batch_end(batch_index, batch_logs)
+    #
+    #             if batch_index == len(batches) - 1:  # last batch
+    #                 # validation
+    #                 if do_validation:
+    #                     # replace with self._evaluate
+    #                     val_outs = self._test_loop(val_f, val_ins, batch_size=batch_size, verbose=0)
+    #                     val_outs = standardize_outputs(val_outs)
+    #                     _logs = [('val_'+label, value) for label, value in zip(val_f.out_labels, val_outs)]
+    #                     epoch_logs.update(_logs)
+    #                     # logger.debug('\nEpoch logs: %s\n' % str(epoch_logs))
+    #
+    #         callbacks.on_epoch_end(epoch, epoch_logs)
+    #         if self.stop_training:
+    #             break
+    #
+    #     callbacks.on_train_end()
+    #     return callbacks_
 
     def _fit(self, f, ins, callbacks, val_f=None, val_ins=None, metrics=(),
              batch_size=128, nb_epoch=100, extra_callbacks=(), shuffle=True, verbose=1):
@@ -198,9 +291,10 @@ class Model(object):
         if f.n_returned_outputs == 0:
             raise ValueError('We can not evaluate the outputs with none outputs')
 
-        standardize_outputs = lambda outputs: [outputs] if f.n_returned_outputs == 1 else outputs
+        standardize_outputs = lambda outputs: [outputs] \
+            if f.n_returned_outputs == 1 and not isinstance(outputs, (list, tuple)) else outputs
         extra_callbacks = list(extra_callbacks)
-        nb_train_sample = len(ins[0])
+        nb_train_sample = ins[0].shape[0]
 
         # logger.debug('out_labels: %s' % str(f.out_labels))
 
@@ -236,6 +330,26 @@ class Model(object):
             'do_validation': do_validation,
             'metrics': list(cndt_metrics),
         })
+
+        def _consume_job():
+            while True:
+                job = self.jobs_pools.get()
+                if job is None:
+                    self.jobs_pools.task_done()
+                    break
+
+                ins_batch, batch_logs = job
+                callbacks.on_batch_begin(batch_index, batch_logs)
+                outs = standardize_outputs(f(*ins_batch))
+                _logs = [(label, value) for label, value in zip(f.out_labels, outs)]
+                batch_logs.update(_logs)
+                callbacks.on_batch_end(batch_index, batch_logs)
+                self.jobs_pools.task_done()
+
+        worker = Thread(target=_consume_job)
+        worker.daemon = True
+        worker.start()
+
         callbacks.on_train_begin()
 
         self.stop_training = False
@@ -257,15 +371,13 @@ class Model(object):
                         If using HDF5 input data, pass shuffle="batch".\n')
                     raise
 
-                batch_logs = {'batch': batch_index, 'size': len(batch_ids)}
-                callbacks.on_batch_begin(batch_index, batch_logs)
-                outs = standardize_outputs(f(*ins_batch))
-                _logs = [(label, value) for label, value in zip(f.out_labels, outs)]
-                batch_logs.update(_logs)
-                callbacks.on_batch_end(batch_index, batch_logs)
+                job_info = {'batch': batch_index, 'size': len(batch_ids)}
+                job_ = (ins_batch, job_info)
+                self.jobs_pools.put(job_)
 
                 if batch_index == len(batches) - 1:  # last batch
                     # validation
+                    self.jobs_pools.join()
                     if do_validation:
                         # replace with self._evaluate
                         val_outs = self._test_loop(val_f, val_ins, batch_size=batch_size, verbose=0)
@@ -278,6 +390,7 @@ class Model(object):
             if self.stop_training:
                 break
 
+        self.jobs_pools.put(None)
         callbacks.on_train_end()
         return callbacks_
 
@@ -1017,7 +1130,7 @@ class Graph(Model, containers.Graph):
             logger.warn('Compiled without weighted samples (classes) supported. Weights will ignored')
         X = [data[name] for name in self.input_order]
         y = [standardize_y(data[name]) for name in self.output_order]
-        if self.is_weighted_input is not None:
+        if self.is_weighted_input:
             sample_weight = [standardize_weights(data[name], sample_weight=sample_weight.get(name),
                                                  class_weight=class_weight.get(name))
                              for name in self.output_order]
@@ -1072,11 +1185,13 @@ class Graph(Model, containers.Graph):
             val_ins = self._prepare_input(validation_data, sample_weight=sample_weight)
 
         elif 0 < validation_split < 1:
-            split_at = max(int(len(ins[0]) * (1 - validation_split)), 1)
+            split_at = max(int(ins[0].shape[0] * (1 - validation_split)), 1)
             # X, X_val = (slice_X(X, 0, split_at), slice_X(X, split_at))
             # y, y_val = (slice_X(y, 0, split_at), slice_X(y, split_at))
+            # ins = X + y
             # val_ins = X_val + y_val
-            ins, val_ins = (self._prepare_input(ins, 0, split_at), self._prepare_input(ins, split_at))
+            # ins, val_ins = (self._prepare_input(ins, 0, split_at), self._prepare_input(ins, split_at))
+            ins, val_ins = (slice_X(ins, 0, split_at), slice_X(ins, split_at))
 
         f = self._train
         # out_labels = ['loss']

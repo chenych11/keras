@@ -58,6 +58,8 @@ class Sequential(Layer):
             self.layers[-1].set_previous(self.layers[-2])
             if not hasattr(self.layers[0], 'input'):
                 self.set_input()
+        else:
+            layer.on_connection_end()
         layer.init_updates()
 
         params, regularizers, constraints, updates = layer.get_params()

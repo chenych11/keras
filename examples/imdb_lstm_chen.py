@@ -29,11 +29,12 @@ from keras.preprocessing import sequence
 # from keras.utils import np_utils
 from keras.models import Sequential
 from keras.layers.core import Dense, Dropout, Activation
-from keras.layers.embeddings import Embedding
+from keras.layers.embeddings import Embedding, LookupTable
 from keras.layers.recurrent import MaskedLayer, Recurrent
 from keras import activations, initializations
 from keras.utils.theano_utils import shared_zeros
 from keras.datasets import imdb
+from keras.callbacks import History, BaseLogger
 
 
 class LSTMLayer(Recurrent):
@@ -115,7 +116,7 @@ class LSTMLayer(Recurrent):
         self.b = theano.shared(np.zeros(shape=(4, self.output_dim), dtype=theano.config.floatX),
                                name='bias', borrow=True)
 
-        self.params = [self.W, self.R]
+        self.params = [self.W, self.R, self.b]
         if train_init_cell:
             self.params.append(self.c_m1)
         if train_init_h:
@@ -232,30 +233,30 @@ X_test = sequence.pad_sequences(X_test, maxlen=maxlen)
 print('X_train shape:', X_train.shape)
 print('X_test shape:', X_test.shape)
 
-print('Build model (The output of the last timestep is applied for classification)...')
-model = Sequential()
-model.add(Embedding(max_features, 128, mask_zero=True))
-model.add(LSTMLayer(128, 128))
-model.add(Dropout(0.5))
-model.add(Dense(128, 1))
-model.add(Activation('sigmoid'))
-
-# try using different optimizers and different optimizer configs
-model.compile(loss='binary_crossentropy', optimizer='adam', class_mode="binary")
-
-print("Train...")
-model.fit(X_train, y_train, batch_size=batch_size, nb_epoch=4, validation_data=(X_test, y_test), show_accuracy=True)
-score, acc = model.evaluate(X_test, y_test, batch_size=batch_size, show_accuracy=True)
-print('Test score:', score)
-print('Test accuracy:', acc)
+# print('Build model (The output of the last timestep is applied for classification)...')
+# model = Sequential()
+# model.add(Embedding(max_features, 128, mask_zero=True))
+# model.add(LSTMLayer(128, 128))
+# model.add(Dropout(0.5))
+# model.add(Dense(128, 1))
+# model.add(Activation('sigmoid'))
+#
+# # try using different optimizers and different optimizer configs
+# model.compile(loss='binary_crossentropy', optimizer='adam', class_mode="binary")
+#
+# print("Train...")
+# model.fit(X_train, y_train, batch_size=batch_size, nb_epoch=4, validation_data=(X_test, y_test), show_accuracy=True)
+# score, acc = model.evaluate(X_test, y_test, batch_size=batch_size, show_accuracy=True)
+# print('Test score:', score)
+# print('Test accuracy:', acc)
 
 print('=' * 60)
 
 print('Build model (The outputs of all timesteps are applied for classification)...')
 model = Sequential()
 model.add(Embedding(max_features, 128, mask_zero=True))
-model.add(LSTMLayer(128, 128, return_sequences=True))
-model.add(MeanPooling())
+model.add(LSTMLayer(128, 128, return_sequences=False))
+# model.add(MeanPooling())
 model.add(Dropout(0.5))
 model.add(Dense(128, 1))
 model.add(Activation('sigmoid'))
@@ -264,7 +265,31 @@ model.add(Activation('sigmoid'))
 model.compile(loss='binary_crossentropy', optimizer='adam', class_mode="binary")
 
 print("Train...")
-model.fit(X_train, y_train, batch_size=batch_size, nb_epoch=4, validation_data=(X_test, y_test), show_accuracy=True)
+# model.fit(X_train, y_train, batch_size=batch_size, nb_epoch=4, validation_data=(X_test, y_test), show_accuracy=True)
+model.fit(X_train, y_train, callbacks=History(), show_metrics=('loss', 'acc'), batch_size=256, nb_epoch=20, verbose=1,
+          extra_callbacks=(BaseLogger(), ), validation_split=0., validation_data=(X_test, y_test), shuffle=True, show_accuracy=True,
+          class_weight=None, sample_weight=None)
 score, acc = model.evaluate(X_test, y_test, batch_size=batch_size, show_accuracy=True)
 print('Test score:', score)
 print('Test accuracy:', acc)
+
+# =========================================================================================================
+# print('Build model (The outputs of all timesteps are applied for classification)...')
+# model = Sequential()
+# model.add(LookupTable(max_features, 128, mask_zero=True))
+# model.add(LSTMLayer(128, 128, return_sequences=False))
+# # model.add(MeanPooling())
+# model.add(Dropout(0.5))
+# model.add(Dense(128, 1, activation='sigmoid'))
+#
+# # try using different optimizers and different optimizer configs
+# model.compile(loss='binary_crossentropy', optimizer='adam', class_mode="binary")
+#
+# print("Train...")
+# # model.fit(X_train, y_train, batch_size=batch_size, nb_epoch=4, validation_data=(X_test, y_test), show_accuracy=True)
+# model.fit(X_train, y_train, callbacks=History(), show_metrics=('loss', 'acc'), batch_size=256, nb_epoch=20, verbose=1,
+#           extra_callbacks=(BaseLogger(), ), validation_split=0., validation_data=(X_test, y_test), shuffle=True, show_accuracy=True,
+#           class_weight=None, sample_weight=None)
+# score, acc = model.evaluate(X_test, y_test, batch_size=batch_size, show_accuracy=True)
+# print('Test score:', score)
+# print('Test accuracy:', acc)
