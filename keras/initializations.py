@@ -6,7 +6,7 @@ import math
 
 from .utils.theano_utils import sharedX, shared_zeros, shared_ones
 
-DEFAULT_DEVICE = theano.config.device
+DEFAULT_DEVICE = 'tmp'  # use for temporary initialization
 floatX = theano.config.floatX
 
 
