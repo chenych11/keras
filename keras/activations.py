@@ -39,6 +39,16 @@ def linear(x):
     return x
 
 
+def exponential(x):
+    return T.exp(x)
+
+
+def normalization(x):
+    y = T.sum(x, axis=-1, keepdims=True)
+    return x / y
+
 from .utils.generic_utils import get_from_module
+
+
 def get(identifier):
     return get_from_module(identifier, globals(), 'activation function')

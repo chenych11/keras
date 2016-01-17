@@ -91,15 +91,10 @@ class SGD(Optimizer):
                     new_p = p + v
                 self.updates.append((p, c(new_p)))  # apply constraints
             except AttributeError:
-                # subtensor update:
-                # v_t = (self.momentum * p.sub_momenton) - lr * g
-                # if self.nesterov:
-                #     new_p = T.inc_subtensor(p, self.momentum * v_t - lr * g)
-                # else:
-                #     new_p = T.inc_subtensor(p, v_t)
-                # self.updates.append((p.momenton_whole, T.set_subtensor(p.sub_momenton, v_t)))
+                sub_param_info = p.subtensor_info
+                param_whole = sub_param_info.base
                 new_p = T.inc_subtensor(p, -lr * g)
-                self.updates.append((p.param_whole, new_p))
+                self.updates.append((param_whole, c(new_p)))
         return self.updates
 
     def get_config(self):
@@ -212,6 +207,7 @@ class Adam(Optimizer):
         self.iterations = shared_scalar(0.)
         self.lr = shared_scalar(lr)
         self.log_beta_1 = shared_scalar(np.log(self.beta_1))
+        self.log_beta_2 = T.as_tensor_variable(np.cast[float_t](np.log(self.beta_2)))
         self.log_lambda = T.as_tensor_variable(np.cast[float_t](np.log(lambda_)))
 
     def get_updates(self, params, constraints, loss):
@@ -222,7 +218,9 @@ class Adam(Optimizer):
         t = self.iterations + 1
         beta_1 = T.exp(self.log_beta_1)
         # lr_t = self.lr * T.sqrt(1-self.beta_2**t)/(1-self.beta_1**t)
-        lr_t = self.lr * T.sqrt(1.-self.beta_2**t)/(1.-beta_1**t)
+        _beta_2_t = T.exp(t * self.log_beta_2)
+        _beta_1_t = T.exp(t * self.log_beta_1 - t * (t-1)/2 * self.log_lambda)
+        lr_t = self.lr * T.sqrt(1.-_beta_2_t)/(1.-_beta_1_t)
 
         for p, g, c in zip(params, grads, constraints):
             try:
@@ -310,6 +308,125 @@ class Adam(Optimizer):
                 "beta_1": self.beta_1,
                 "beta_2": self.beta_2,
                 "epsilon": self.epsilon}
+
+
+class AdamAnneal(Optimizer):
+    '''
+        Reference: http://arxiv.org/abs/1412.6980v8
+
+        Default parameters follow those provided in the original paper.
+    '''
+    def __init__(self, lr=0.001, beta_1=0.9, beta_2=0.999, lambda_=1.0-1.0e-8, epsilon=1e-8,
+                 gamma=0.01, lr_min=0.0005, *args, **kwargs):
+        super(AdamAnneal, self).__init__(**kwargs)
+        self.__dict__.update(locals())
+        self.iterations = shared_scalar(0.)
+        self.lr = shared_scalar(lr)
+        self.log_beta_1 = shared_scalar(np.log(self.beta_1))
+        self.log_beta_2 = T.as_tensor_variable(np.cast[float_t](np.log(self.beta_2)))
+        self.log_lambda = T.as_tensor_variable(np.cast[float_t](np.log(lambda_)))
+
+    def get_updates(self, params, constraints, loss):
+        grads = self.get_gradients(loss, params)
+        self.updates = [(self.iterations, self.iterations+1.),
+                        (self.log_beta_1, self.log_beta_1 + self.log_lambda)]
+
+        t = self.iterations + 1
+        beta_1 = T.exp(self.log_beta_1)
+        # lr_t = self.lr * T.sqrt(1-self.beta_2**t)/(1-self.beta_1**t)
+        _beta_2_t = T.exp(t * self.log_beta_2)
+        _beta_1_t = T.exp(t * self.log_beta_1 - t * (t-1)/2 * self.log_lambda)
+        lr_t = (self.lr * 1./(1.+self.gamma*t) + self.lr_min) * T.sqrt(1.-_beta_2_t)/(1.-_beta_1_t)
+
+        for p, g, c in zip(params, grads, constraints):
+            try:
+                m = theano.shared(p.get_value() * 0.)  # zero init of moment
+                v = theano.shared(p.get_value() * 0.)  # zero init of velocity
+                m_t = (beta_1 * m) + (1. - beta_1) * g
+                # m_t = (self.beta_1 * m) + (1. - self.beta_1) * g
+                v_t = (self.beta_2 * v) + (1. - self.beta_2) * (g**2)
+                p_t = p - lr_t * m_t / (T.sqrt(v_t) + self.epsilon)
+                self.updates.append((m, m_t))
+                self.updates.append((v, v_t))
+                self.updates.append((p, c(p_t)))  # apply constraints
+            except AttributeError:
+                # subtensor update:
+                # out of the subtensor.
+                sub_param_info = p.subtensor_info
+                param_shape = sub_param_info.shape
+                selection = sub_param_info.idx
+                param = sub_param_info.base
+
+                m = theano.shared(np.zeros(shape=param_shape, dtype=float_t), borrow=True)
+                v = theano.shared(np.zeros(shape=param_shape, dtype=float_t), borrow=True)
+                # lb1_scalar = T.log(self.beta_1)
+                # lb2_scalar = T.log(self.beta_2)
+
+                # lb1_scalar = T.as_tensor_variable(np.cast[float_t](np.log(self.beta_1)))
+                lb1_scalar = self.log_beta_1
+                lb2_scalar = T.as_tensor_variable(np.cast[float_t](np.log(self.beta_2)))
+                log_beta_1_ = theano.shared(np.log(self.beta_1) * np.ones(shape=(param_shape[0], ), dtype=float_t))
+                log_beta_2_ = theano.shared(np.log(self.beta_2) * np.ones(shape=(param_shape[0], ), dtype=float_t))
+                log_beta_1 = log_beta_1_.dimshuffle(0, 'x')
+                log_beta_2 = log_beta_2_.dimshuffle(0, 'x')
+                sub_momentum = m[selection]
+                sub_volocity = v[selection]
+                sub_log_beta_1 = log_beta_1[selection]
+                sub_log_beta_2 = log_beta_2[selection]
+
+                sub_beta_1 = T.exp(sub_log_beta_1)
+                sub_beta_2 = T.exp(sub_log_beta_2)
+
+                m_t = (sub_beta_1 * sub_momentum) + (1. - T.exp(self.log_beta_1)) * g
+                v_t = (sub_beta_2 * sub_volocity) + (1. - self.beta_2) * (g**2)
+                p_t = T.set_subtensor(p,  c(p - lr_t * m_t / (T.sqrt(v_t) + self.epsilon)))
+                self.updates.append((m, T.set_subtensor(sub_momentum, m_t)))
+                self.updates.append((v, T.set_subtensor(sub_volocity, v_t)))
+                self.updates.append((param, p_t))
+
+                lb1 = log_beta_1.squeeze() + lb1_scalar + self.log_lambda
+                lb2 = log_beta_2.squeeze() + lb2_scalar
+                new_lb1 = T.set_subtensor(lb1[selection], lb1_scalar)
+                new_lb2 = T.set_subtensor(lb2[selection], lb2_scalar)
+                self.updates.append((log_beta_1_, new_lb1))
+                self.updates.append((log_beta_2_, new_lb2))
+
+                # beta1_scalar = T.as_tensor_variable(np.cast[float_t](self.beta_1))
+                # beta2_scalar = T.as_tensor_variable(np.cast[float_t](self.beta_2))
+                # beta_1_ = theano.shared(self.beta_1 * np.ones(shape=(param_shape[0], ), dtype=float_t))
+                # beta_2_ = theano.shared(self.beta_2 * np.ones(shape=(param_shape[0], ), dtype=float_t))
+                # beta_1 = beta_1_.dimshuffle(0, 'x')
+                # beta_2 = beta_2_.dimshuffle(0, 'x')
+                # sub_momentum = m[selection]
+                # sub_volocity = v[selection]
+                # sub_beta_1 = beta_1[selection]
+                # sub_beta_2 = beta_2[selection]
+                #
+                # m_t = (sub_beta_1 * sub_momentum) + (1. - self.beta_1) * g
+                # v_t = (sub_beta_2 * sub_volocity) + (1. - self.beta_2) * (g**2)
+                # p_t = T.set_subtensor(p,  c(p - lr_t * m_t / (T.sqrt(v_t) + self.epsilon)))
+                # self.updates.append((m, T.set_subtensor(sub_momentum, m_t)))
+                # self.updates.append((v, T.set_subtensor(sub_volocity, v_t)))
+                # self.updates.append((param, p_t))
+                #
+                # lb1 = beta_1.squeeze() * beta1_scalar
+                # lb2 = beta_2.squeeze() * beta2_scalar
+                # new_lb1 = T.set_subtensor(lb1[selection], beta1_scalar)
+                # new_lb2 = T.set_subtensor(lb2[selection], beta2_scalar)
+                # self.updates.append((beta_1_, new_lb1))
+                # self.updates.append((beta_2_, new_lb2))
+
+        return self.updates
+
+    def get_config(self):
+        return {"name": self.__class__.__name__,
+                "lr": float(self.lr.get_value()),
+                "beta_1": self.beta_1,
+                "beta_2": self.beta_2,
+                "gamma": self.gamma,
+                "lr_min": self.lr_min,
+                "epsilon": self.epsilon}
+
 
 # aliases
 sgd = SGD
